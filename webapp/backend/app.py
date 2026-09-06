@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from . import core
 from .jobs import registry
 
-APP_VERSION = '2.2.0'
+APP_VERSION = '2.2.1'
 # 单次拖拽上传的总量上限。没有上限时, 一次拖进来的东西可以无限写满系统临时目录
 # (落盘发生在任何一个字节被解析之前), 而本机进程面本来就无鉴权。
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
@@ -440,16 +440,23 @@ async def upload(request: Request):
         # 落盘会撞到设备而不是文件; 前面补一个下划线就只是普通文件名了
         if stem.upper().rstrip('.').split('.')[0] in _WIN_RESERVED:
             stem = '_' + stem
-        dest = os.path.join(target_dir, stem + ext)
-        if os.path.exists(dest):
-            # 同名不静默覆盖: 追加序号 (与输出的防覆盖改名同一立场)
-            n = 1
-            while os.path.exists(os.path.join(target_dir, f'{stem} ({n}){ext}')):
+        # 同名不静默覆盖: 追加序号 (与输出的防覆盖改名同一立场)。
+        # 占位必须原子: 旧实现 exists 检查与 open 之间有竞态窗口, 同一秒内并发
+        # 拖入的同名文件会双双通过检查, 后写者静默覆盖先写者。O_CREAT|O_EXCL
+        # 让内核保证只有一个赢家, 输的那一方拿到下一个序号。
+        n = 0
+        while True:
+            dest = os.path.join(target_dir, stem + ext) if n == 0 \
+                else os.path.join(target_dir, f'{stem} ({n}){ext}')
+            try:
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | getattr(os, 'O_BINARY', 0), 0o666)
+                break
+            except FileExistsError:
                 n += 1
-            dest = os.path.join(target_dir, f'{stem} ({n}){ext}')
         written = 0
         try:
-            with open(dest, 'wb') as fh:
+            with os.fdopen(fd, 'wb') as fh:
                 # 分块落盘: 大文件不再整体读进内存; 同时按字节数封顶, 不能让一次
                 # 拖拽把临时目录写满
                 while True:

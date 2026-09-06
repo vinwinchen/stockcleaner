@@ -41,6 +41,7 @@ export default function App() {
   const [browse, setBrowse] = useState<null | 'in' | 'out'>(null)
   const [theme, setTheme] = useState<Theme>(systemTheme)
   const [nativeShell, setNativeShell] = useState(true)
+  const [version, setVersion] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
 
   const configRef = useRef(config)
@@ -52,6 +53,7 @@ export default function App() {
     api.meta()
       .then((m) => {
         setNativeShell(Boolean(m?.native))
+        if (m?.version) setVersion(m.version)
         // 打包时可用 SC_THEME=dark|light 钉死默认主题; 'system' 表示跟随系统
         if (m?.theme === 'dark' || m?.theme === 'light') setTheme(m.theme)
       })
@@ -322,7 +324,9 @@ export default function App() {
         <div className="flex shrink-0 items-center gap-2">
           <Database size={17} weight="duotone" className="text-accent" aria-hidden />
           <span className="text-[14px] font-semibold tracking-[-0.01em]">StockCleaner</span>
-          <Chip title="清洗内核版本">内核 v2.2</Chip>
+          <Chip title="清洗内核版本 (来自 /api/meta, 与 APP_VERSION 同步)">
+            内核 {version ? `v${version}` : '…'}
+          </Chip>
         </div>
 
         <div className="h-5 w-px shrink-0 bg-line" aria-hidden />

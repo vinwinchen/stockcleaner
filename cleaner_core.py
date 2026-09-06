@@ -124,6 +124,10 @@ def _decimal_from(digits, factor=1):
     1.1亿 -> 110000000.00000001 —— 正是原则 9 要禁止的表示漂移。
     纯整数 (没有小数也没有指数) 占真实数据的绝大多数, 单独走一条快路。
 
+    落 float 时一律由 float() 对十进制字面量做**正确舍入**, 不许用
+    whole + rest/scale 拼: 除法、加法各舍入一次, 1.64 会拼成 1.6400000000000001、
+    2.97 拼成 2.9699999999999998, 都比字面量的正确舍入值偏出一个 ULP。
+
     唯一的例外: |整数部分| >= 2^53 且带除不尽的小数时返回 None (按解析失败保留
     原值)。这个量级 float64 连整数部分都放不下 (相邻间隔 > 1), 强转必然舍入整数位、
     str() 还会写成科学计数法 —— 宁可不数值化, 也不静默改写 (原则 1)。
@@ -134,6 +138,16 @@ def _decimal_from(digits, factor=1):
     if not m:
         return None
     sign, int_part, frac_part, exp = m.groups()
+    if factor == 1 and not exp:
+        # 最常见路径: 无单位无指数的纯字面量。x.0 形式仍走精确整数
+        # (float64 装不下 2^53 以上的整数, '9007199254740993.0' 不许被舍入)。
+        if not (frac_part or '').strip('0'):
+            value = int(int_part)
+        elif int(int_part) >= 2 ** 53:
+            return None
+        else:
+            value = float(digits)
+        return -value if sign == '-' else value
     coef = int(int_part + (frac_part or ''))
     scale = 10 ** len(frac_part or '')
     e = int(exp or 0)
@@ -145,7 +159,12 @@ def _decimal_from(digits, factor=1):
     whole, rest = divmod(coef, scale)
     if rest and abs(whole) >= 2 ** 53:
         return None
-    value = whole if rest == 0 else whole + rest / scale
+    if rest == 0:
+        value = whole
+    else:
+        # 带单位/指数的稀少路径: 整数部分已确认在 float64 精度内,
+        # 拼回十进制字面量交给 float() 正确舍入 (理由同上, 不用加法拼浮点)。
+        value = float(f'{whole}.{str(rest).zfill(len(str(scale)) - 1)}')
     return -value if sign == '-' else value
 
 
@@ -471,9 +490,18 @@ def _decode_bytes(raw):
     gb18030 的字节域几乎覆盖 big5, 所以 big5 分支实际很难到达: Big5 源文件多半
     会被 gb18030 "成功" 解成乱码。这在没有编码探测器的前提下无法可靠区分,
     所以兜底解码一律发警告, 不静默 (原则 7: 全程留痕)。
+
+    UTF-16 只认 BOM (它的文本本身就含 NUL, 字节域探测帮不上忙)。BOM 在但随后的
+    字节不是合法 UTF-16 (截断/改名的二进制) 时抛 ValueError, 由调用方按
+    "二进制拒读"的同一口径处理, 不静默落一张乱码表。
     """
     if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
-        return 'utf-16', raw.decode('utf-16'), None
+        try:
+            return 'utf-16', raw.decode('utf-16'), None
+        except UnicodeDecodeError as exc:
+            raise ValueError('带 UTF-16 BOM, 但内容不是合法的 UTF-16 文本 '
+                             '(可能是截断或改名的二进制文件); '
+                             '请先在源端导出成 csv/xlsx') from exc
     if raw.startswith(b'\xef\xbb\xbf'):
         raw = raw[3:]
     for enc in ('utf-8', 'gb18030', 'big5'):
@@ -644,9 +672,16 @@ def _read_delimited(path, ext):
         raw = f.read()
     # 扩展名可以撒谎, NUL 字节不会: 真二进制文件 (改过名的 .doc / .xls / 压缩包)
     # 一旦被当文本读, 会洗出一整表乱码列还照样落盘, 所以在这里挡住。
-    if b'\x00' in raw[:65536]:
+    # 例外是 UTF-16: 它的文本本身就含 NUL, 只给带 BOM 的放行 (交给 _decode_bytes
+    # 严格解码); 不带 BOM 的 UTF-16 无法与二进制区分, 仍被拦下。
+    bom16 = raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff')
+    if not bom16 and b'\x00' in raw[:65536]:
         raise ValueError('内容是二进制 (含 NUL 字节), 未当文本读取; 请先在源端导出成 csv/xlsx')
     encoding, text, warning = _decode_bytes(raw)
+    if '\x00' in text:
+        # 兜底复检: 解码后仍含 NUL 的不是文本 (UTF-32 顶着 UTF-16 BOM、或 NUL
+        # 躲在 64KiB 探测窗口之外), 不能让 NUL 混进任何一格文本。
+        raise ValueError('内容是二进制 (解码后仍含 NUL 字节), 未当文本读取; 请先在源端导出成 csv/xlsx')
     delim = _sniff_delimiter(text, default='\t' if ext in ('.txt', '.tsv') else ',')
     warns = [warning] if warning else []
     df = None

@@ -436,6 +436,39 @@ def test_unit_precision_no_drift():
     print('[ok] 单位换算全程整数 (无 float 表示漂移)')
 
 
+def test_float_no_double_rounding():
+    """对抗性回归: 落 float 必须是字面量的正确舍入, 不许用加法拼浮点。
+
+    旧实现 whole + rest/scale 有两次舍入 (除法一次、加法一次), 1.64 会拼成
+    1.6400000000000001、2.97 -> 2.9699999999999998、1.61 -> 1.6099999999999999,
+    全部比 float('1.64') 的正确舍入值偏出一个 ULP。
+    """
+    for s in ('1.64', '2.97', '1.61', '3.33', '0.1', '12.34'):
+        got = parse_numeric(s)
+        assert got == float(s) and repr(got) == repr(float(s)), (s, got, float(s))
+    for i in range(500):                       # 大批量两位小数, 覆盖各种舍入边界
+        s = f'{i}.{(i * 37) % 100:02d}'
+        assert parse_numeric(s) == float(s), (s, parse_numeric(s), float(s))
+    # 单位 / 指数路径同样不许漂
+    assert parse_numeric('1.64万') == 16400 and isinstance(parse_numeric('1.64万'), int)
+    assert repr(parse_numeric('1.23456千')) == '1234.56'
+    assert parse_numeric('2.97e-2') == float('2.97e-2')
+    # x.0 形式的大整数仍走精确整数; 整数部分超 2^53 且带非零小数仍保留原值
+    assert parse_numeric('9007199254740993.0') == 9007199254740993
+    assert isinstance(parse_numeric('9007199254740993.0'), int)
+    assert parse_numeric('9007199254740993.5') is None
+
+    tmp = tempfile.mkdtemp()
+    p = os.path.join(tmp, 'f.csv')
+    with open(p, 'w', encoding='utf-8', newline='') as f:
+        f.write('价\n1.64\n2.97\n1.61\n')
+    _, out = process_file(p, os.path.join(tmp, 'o'), dict(BASE_CFG, numericize=True))
+    body = open(out, encoding='utf-8-sig').read()
+    assert '1.64' in body and '2.97' in body, body
+    assert '6400000000000001' not in body and '9699999999999998' not in body, body
+    print('[ok] 小数落 float 为正确舍入 (1.64/2.97 不再偏出一个 ULP)')
+
+
 def test_thousands_grouping_rejected():
     """对抗性回归: 分组不合规时不猜逗号是什么。
 
@@ -685,6 +718,56 @@ def test_huge_decimal_with_fraction_keeps_original():
     print('[ok] 超 2^53 的小数按解析失败保留原值 (纯整数不受影响)')
 
 
+def test_utf16_bom_read_and_binary_reject():
+    """对抗性回归: 带 BOM 的 UTF-16 是文本, NUL 守卫必须给它放行。
+
+    UTF-16 的文本本身就含 NUL 字节, 旧实现一律被 NUL 守卫当成二进制拒读,
+    _decode_bytes 的 utf-16 分支成了死代码。现在: BOM 在 -> 严格解码后照常读;
+    无 BOM 的 UTF-16 (无法与二进制区分)、解码后仍含 NUL 的伪 UTF-16
+    (UTF-32 顶着 BOM)、BOM 后不是合法 UTF-16 (截断/改名二进制) 仍按二进制拒读。
+    """
+    tmp = tempfile.mkdtemp()
+    p = os.path.join(tmp, 'u16.csv')
+    with open(p, 'wb') as f:
+        f.write('代码,名称\n000001,平安银行\n600519,贵州茅台\n'.encode('utf-16'))
+    d, meta = read_table(p)
+    assert meta['encoding'] == 'utf-16', meta
+    assert list(d.columns) == ['代码', '名称'], list(d.columns)
+    assert list(d['代码']) == ['000001', '600519'], d['代码'].tolist()
+    assert list(d['名称']) == ['平安银行', '贵州茅台'], d['名称'].tolist()
+
+    # 无 BOM 的 UTF-16LE: 仍被 NUL 守卫拦下 (行为不变)
+    p2 = os.path.join(tmp, 'u16le.csv')
+    with open(p2, 'wb') as f:
+        f.write('代码,名称\n000001,平安银行\n'.encode('utf-16-le'))
+    try:
+        read_table(p2)
+        assert False, '无 BOM 的 UTF-16 应被拒读'
+    except ValueError:
+        pass
+
+    # UTF-32LE 顶着 UTF-16 BOM: 能"解码"但解码后仍含 NUL, 同样拒读
+    p3 = os.path.join(tmp, 'u32.csv')
+    with open(p3, 'wb') as f:
+        f.write(b'\xff\xfe\x00\x00' + '代码\n000001\n'.encode('utf-32-le'))
+    try:
+        read_table(p3)
+        assert False, '解码后仍含 NUL 应被拒读'
+    except ValueError:
+        pass
+
+    # BOM 后不是合法 UTF-16 (截断): 明确报错, 不落乱码表
+    p4 = os.path.join(tmp, 'truncated.csv')
+    with open(p4, 'wb') as f:
+        f.write(b'\xff\xfe\x61')               # BOM + 半个码元
+    try:
+        read_table(p4)
+        assert False, 'BOM 后非法 UTF-16 应被拒读'
+    except ValueError:
+        pass
+    print('[ok] 带 BOM 的 UTF-16 可读; 无 BOM/伪 BOM/截断仍按二进制拒读')
+
+
 if __name__ == '__main__':
     test_parse_numeric()
     test_numericize_id_column()
@@ -705,6 +788,7 @@ if __name__ == '__main__':
     test_xlsx_big_int_survives_roundtrip()
     test_excel_engine_preserves_leading_zero()
     test_unit_precision_no_drift()
+    test_float_no_double_rounding()
     test_thousands_grouping_rejected()
     test_na_text_survives_read()
     test_index_shift_keeps_column()
@@ -717,4 +801,5 @@ if __name__ == '__main__':
     test_protected_col_deleted_by_option_warns()
     test_protected_columns_never_enter_wash_channels()
     test_huge_decimal_with_fraction_keeps_original()
+    test_utf16_bom_read_and_binary_reject()
     print('\n全部测试通过 ✔')

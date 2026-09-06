@@ -35,7 +35,7 @@ CONFIG = {
     'drop_empty_rows': True, 'drop_empty_cols': False, 'head_cut': 0, 'tail_cut': 0,
     'strip_tokens': [], 'strip_column_mode': False, 'strip_column': '',
     'column_overrides': {}, 'sample_rows': 500,
-    'fullwidth': True,                        # 产品默认: 全角开
+    'fullwidth': False,                       # 产品默认: 全角关
 }
 
 
@@ -183,7 +183,7 @@ def main():
     check('csv: 601 行 7 列', by_name['全功能验证.csv']['rows'] == 601
           and by_name['全功能验证.csv']['cols'] == 7, by_name['全功能验证.csv'])
 
-    # ---------- 2. 默认预览 (全角开) ----------
+    # ---------- 2. 默认预览 (全角关: 全角格原样保留) ----------
     pv = call('/api/preview', {'path': CSV, 'config': CONFIG})
     cols = {c['name']: c for c in pv['columns']}
     check('超过样本线: sampled=True 且带样本口径警告',
@@ -193,7 +193,7 @@ def main():
           pv['report']['dropped_rows'])
     check('代码列: 标识符保护命中', cols['代码']['id_protected'], cols['代码'])
     expect_cell(pv, '代码', '000001.0', '000001.0')          # 小数形式不被吃成 1
-    expect_cell(pv, '代码', '６００５１９', '600519')         # 全角代码转半角后仍是文本
+    expect_cell(pv, '代码', '６００５１９', '６００５１９')   # 全角默认关: 原样保留
     expect_sample(cols, '成交额', '1,234.5万', '12345000', 'int')
     expect_sample(cols, '成交额', '1.5万亿', '1500000000000', 'int')
     expect_sample(cols, '成交额', '3千万', '30000000', 'int')
@@ -207,11 +207,11 @@ def main():
     expect_cell(pv, '成交额', '待定', '待定')                  # 解析失败保留原值
     expect_cell(pv, '涨跌幅', '12.5%', '12.5%')               # 百分比歧义不动
     expect_cell(pv, '涨跌幅', '—', '—')
-    expect_cell(pv, '交易日期', '２０２３．１．８', '2023-01-08')  # 全角日期被全角通道接住
+    expect_cell(pv, '交易日期', '２０２３．１．８', '２０２３．１．８')  # 全角默认关: 保留原值
     expect_cell(pv, '交易日期', '2023.2.30', '2023.2.30')      # 非法日期保留
     expect_cell(pv, '交易日期', '待定', '待定')
-    expect_cell(pv, '名称', 'ＨＫＣ／ＡＢＢ　（２０２４）', 'HKC/ABB (2024)')
-    check('全角通道有计数', pv['report']['fullwidth_cells'] > 0, pv['report'])
+    expect_cell(pv, '名称', 'ＨＫＣ／ＡＢＢ　（２０２４）', 'ＨＫＣ／ＡＢＢ　（２０２４）')
+    check('全角通道默认关闭 (0 格)', pv['report']['fullwidth_cells'] == 0, pv['report'])
     check('空白列默认还在 (drop_empty_cols 关)', '空白列' in cols, list(cols))
 
     # ---------- 2b. 三条"保守优先"的钉 ----------
@@ -242,12 +242,13 @@ def main():
           {c['name']: c['changed'] for c in pv['columns']} == _truth_changes(CSV, CONFIG),
           ({c['name']: c['changed'] for c in pv['columns']}, _truth_changes(CSV, CONFIG)))
 
-    # ---------- 3. 全角关: 文本列不动, 但数值化路径的全角数字仍接得住 ----------
-    pv_off = call('/api/preview', {'path': CSV, 'config': dict(CONFIG, fullwidth=False)})
-    off_cols = {c['name']: c for c in pv_off['columns']}
-    expect_cell(pv_off, '交易日期', '２０２３．１．８', '２０２３．１．８')
-    expect_cell(pv_off, '名称', 'ＨＫＣ／ＡＢＢ　（２０２４）', 'ＨＫＣ／ＡＢＢ　（２０２４）')
-    expect_sample(off_cols, '成交额', '２３４', '234', 'int')   # 内核窄表始终做全角数字翻译
+    # ---------- 3. 全角显式开: 文本列改写, 数值化路径的全角数字照旧接得住 ----------
+    pv_on = call('/api/preview', {'path': CSV, 'config': dict(CONFIG, fullwidth=True)})
+    on_cols = {c['name']: c for c in pv_on['columns']}
+    expect_cell(pv_on, '交易日期', '２０２３．１．８', '2023-01-08')  # 全角日期被全角通道接住
+    expect_cell(pv_on, '名称', 'ＨＫＣ／ＡＢＢ　（２０２４）', 'HKC/ABB (2024)')
+    expect_cell(pv_on, '代码', '６００５１９', '600519')       # 全角代码转半角后仍是文本
+    expect_sample(on_cols, '成交额', '２３４', '234', 'int')   # 内核窄表始终做全角数字翻译
 
     # ---------- 4. 删空列: 混有纯空格的列也要被删 ----------
     pv_dc = call('/api/preview', {'path': CSV, 'config': dict(CONFIG, drop_empty_cols=True)})
@@ -283,7 +284,7 @@ def main():
         body = fh.read()
     for needle, label in [
         ('000001.0', '小数形式代码原样'),
-        ('600519', '全角代码转半角'),
+        ('６００５１９', '全角代码默认保留'),
         ('12345000', '千分位+万'),
         ('1500000000000', '万亿整数'),
         ('-1234', '会计负数'),
@@ -293,7 +294,7 @@ def main():
         ('12.5%', '百分比保留'),
         ('2023.2.30', '非法日期保留'),
         ('2023-01-05', '日期统一'),
-        ('HKC/ABB (2024)', '全角文本转半角'),
+        ('ＨＫＣ／ＡＢＢ', '全角文本默认保留'),
         ('待定', '失败值保留'),
     ]:
         check(f'csv 输出含 {label} ({needle})', needle in body, body[:300])

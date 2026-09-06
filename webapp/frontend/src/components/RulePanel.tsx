@@ -16,7 +16,7 @@ export const DEFAULT_CONFIG: Config = {
   drop_empty_rows: true,
   drop_empty_cols: false,
   normalize_dates: true,
-  fullwidth: true,
+  fullwidth: false,
   output_format: 'keep',
   column_overrides: {},
   sample_rows: 500,

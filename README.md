@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue)]()
+[![Version](https://img.shields.io/badge/version-2.2.1-blue)]()
 
 </div>
 
@@ -37,10 +37,10 @@ StockCleaner 把这条路反过来走：**逐值解析，失败保留原值，�
 | `1,234.5` | `1234.5` | 千分位 |
 | `¥1,234` / `1,234元` | `1234` | 货币符号、单位后缀 |
 | `(1,234)` | `-1234` | 会计负数 |
-| `１２３` | `123` | 全角转半角（默认开，可关，可按列豁免） |
+| `１２３` | `123` | 全角数字在数值化内建翻译；文本列的全角转半角通道默认关，可开启，可按列豁免 |
 | `1.5亿` / `3千万` / `1.5万亿` | `150000000` / `30000000` / `1500000000000` | 中文单位换算，全程整数运算 |
 | `1.005万` | `10050` | 精确整数缩放，不是 `10049.999999999998` |
-| `2023年1月1日` / `2023.01.01` / `２０２３．１．８` | `2023-01-01` | 日期按内容识别，不依赖列名 |
+| `2023年1月1日` / `2023.01.01` | `2023-01-01` | 日期按内容识别，不依赖列名（`２０２３．１．８` 需开启全角转半角） |
 | `2023-01-05 14:30:00` | `2023-01-05` + 新列 `列名_时间`（`14:30:00`） | 时间分量拆列保留，不截成日期 |
 | `600519.0` | `600519` | 纯整数全程精确，无 `x.0` 表示漂移 |
 | `N/A` / `NULL` | 原样保留 | 不吃 pandas 缺失值名单里的文本 |
@@ -50,7 +50,7 @@ StockCleaner 把这条路反过来走：**逐值解析，失败保留原值，�
 
 **读得进来**
 - 支持 `.csv` `.tsv` `.txt` `.xlsx` `.xls` `.xlsm`；后缀不对但内容是文本表格的（`.dat` `.log`、无后缀）按文本猜读并留警告，含 NUL 的真二进制拒读。
-- 编码探测：BOM + 严格解码顺序 utf-8 → gb18030 → big5，兜底解码一律写进警告。
+- 编码探测：BOM（utf-8 / UTF-16）+ 严格解码顺序 utf-8 → gb18030 → big5，兜底解码一律写进警告。
 - 分隔符按"能不能把每行切成同样多列"打分（Tab/逗号/分号/竖线），引号里的字符不算票。
 - 读取阶段零破坏：`dtype=object` 文本保真 + `keep_default_na=False`，字段数与表头不一致的行显式修复，绝不让 pandas 静默当索引、丢列、吃文本。
 - Excel 读取可选 Rust 引擎 [python-calamine](https://github.com/dimastbk/python-calamine)（快 4-5 倍，需配 `dtype=object` 保住前导零），没装自动退回 openpyxl。
@@ -106,10 +106,10 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 ## 自测
 
 ```bash
-python test_cleaner_core.py                        # 内核回归 (32 项)
+python test_cleaner_core.py                        # 内核回归 (33 项)
 python webapp/test_service_layers.py               # 编排/任务/登记层分层回归, 不起服务
 python run.py --port 8720 --no-shell &             # 另开一个终端
-python api_selftest.py http://127.0.0.1:8720       # 服务层契约 + 端到端 (55 项断言)
+python api_selftest.py http://127.0.0.1:8720       # 服务层契约 + 端到端 (60 项断言)
 python make_fullsample.py                          # 生成全功能样例 (幂等)
 python verify_fullsample.py http://127.0.0.1:8720  # 全功能样例逐项实测
 ```
@@ -122,10 +122,10 @@ python verify_fullsample.py http://127.0.0.1:8720  # 全功能样例逐项实测
 
 | 配置 | 端到端 |
 |---|---|
-| calamine 读 + 写 csv（产品默认全角开） | **15.0 s** |
-| calamine 读 + 写 csv（全角关） | 14.0 s |
-| calamine 读 + 写 xlsx（全角开，产品默认） | 40.3 s |
-| calamine 读 + 写 xlsx（全角关） | 37.9 s |
+| calamine 读 + 写 csv（全角开） | 15.0 s |
+| calamine 读 + 写 csv（全角关，产品默认） | **14.0 s** |
+| calamine 读 + 写 xlsx（全角开） | 40.3 s |
+| calamine 读 + 写 xlsx（全角关，产品默认） | **37.9 s** |
 | openpyxl 读 + 写 xlsx（历史对照） | 43.0 s |
 
 分段计时（`bench_xlsx.py`，全表 20 万行 × 12 列）：
@@ -168,8 +168,8 @@ python verify_fullsample.py http://127.0.0.1:8720  # 全功能样例逐项实测
 
 - **百分比** `12.5%` 不转换：转成 `12.5` 还是 `0.125` 语义有歧义，保留原值最安全。
 - **Excel 仅读第一个 sheet**。
-- **无 BOM 的 UTF-16** 无法可靠识别；**Big5 源文件没有独立通道**（gb18030 字节域几乎覆盖 big5，会被"成功"解成乱码）—— 凡兜底解码一律写进警告，确认是 Big5 请先在源端转码。
-- **全角开关默认开**（内核层默认不传就不做，两层默认值故意不同）：会改写名称/备注类文本列的全角字符，转换格数计入报告、界面常驻提示、任意列可点锁豁免。关掉后全角日期不被识别。
+- **带 BOM 的 UTF-16** 可以读（BOM 之后的字节必须是合法 UTF-16，否则按二进制拒读）；**无 BOM 的 UTF-16** 会被 NUL 守卫当二进制拦下（没有 BOM 就无法与二进制区分）；**Big5 源文件没有独立通道**（gb18030 字节域几乎覆盖 big5，会被"成功"解成乱码）—— 凡兜底解码一律写进警告，确认是 Big5 请先在源端转码。
+- **全角开关默认关**（服务层与内核缺省一致，不传就不做）：开启后会改写名称/备注类文本列的全角字符，转换格数计入报告、界面常驻提示、任意列可点锁豁免。关掉时全角日期（２０２３．１．８）不被识别；全角数字（２３４）仍由数值化的内建窄表接住。
 - **预览是样本口径**（前 500 行）：列类型识别同样只基于样本，前 500 行没有前导零、后面才有的列，预览标数值列而正式运行整列保留；界面常驻警告。
 - **xlsx 里 `|int| ≥ 2^53` 的整数按文本写出**；**超过 2^53 的小数按"解析失败"保留原值**（float64 在这个量级连整数部分都放不下）。
 - **SSE 重放窗口是 1024 条事件**（缓冲 2 万条）：一次批次约 340 个文件之内重连无损，超出会有显式的缺口标记，不假装补齐。
@@ -202,7 +202,7 @@ npm --prefix frontend run build                    # 先出前端 dist
 ```
 stockcleaner/
 ├── cleaner_core.py          清洗内核: 唯一实现, 无 GUI 依赖, 可独立测试
-├── test_cleaner_core.py     内核回归测试 (32 项)
+├── test_cleaner_core.py     内核回归测试 (33 项)
 └── webapp/                  桌面界面
     ├── run.py               入口: 本地服务 + pywebview 桌面壳
     ├── backend/             FastAPI 层 (只做编排, 不含任何解析逻辑)
@@ -214,7 +214,7 @@ stockcleaner/
     ├── samples/             演示与自测数据
     ├── make_fullsample.py   生成"全功能验证"对抗样例 (601 行)
     ├── verify_fullsample.py 全功能样例逐项实测 (对着运行中的服务)
-    ├── api_selftest.py      服务层契约自测 (55 项断言, 需要起服务)
+    ├── api_selftest.py      服务层契约自测 (60 项断言, 需要起服务)
     ├── test_service_layers.py 编排/任务/登记层的离线分层回归 (不起服务)
     ├── bench_*.py|ps1       性能剖析: 分段计时 / 端到端 / 引擎 A/B / 热路径四段
     └── StockCleaner.spec    PyInstaller 打包配置

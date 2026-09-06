@@ -5,7 +5,8 @@
   python run.py --port 8720 --no-shell      # 另开一个终端
   python api_selftest.py [base_url]         # 默认 http://127.0.0.1:8720
 
-覆盖: meta -> collect -> inspect -> preview(列保护/规则变更) -> run -> SSE -> 输出内容核对,
+覆盖: meta -> collect -> inspect -> preview(列保护/规则变更) -> run -> SSE -> 输出内容核对
+-> 拖拽上传(同名防覆盖/并发不互覆),
 另含两组关键回归: 列保护贯通正式运行路径 (曾只在预览生效)、>2^53 大整数全程零精度丢失。
 """
 
@@ -13,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -27,8 +29,8 @@ CONFIG = {
     'drop_empty_rows': True, 'drop_empty_cols': False, 'head_cut': 0, 'tail_cut': 0,
     'strip_tokens': [], 'strip_column_mode': False, 'strip_column': '',
     'column_overrides': {}, 'sample_rows': 500,
-    # 基线显式钉关: 让"全角日期保留原值"这类断言继续描述内核原始路径。
-    # 产品默认是开的, 由下面第 6 组用"不传该键"的请求单独钉住。
+    # 产品默认就是全角关, 这里显式钉住; 第 6 组用"不传该键"的请求钉产品缺省,
+    # 用 fullwidth=True 钉显式开启的一侧。
     'fullwidth': False,
 }
 
@@ -251,25 +253,26 @@ def main():
     check('默认输出建议为 cleaned/ 子目录',
           sug['suggested_output'].endswith('cleaned'), sug['suggested_output'])
 
-    # 6) 全角通道: 产品默认开 (不传该键就该改写), 显式关则保留原值
+    # 6) 全角通道: 产品默认关 (不传该键就保留原值), 显式开才改写
     no_key = {k: v for k, v in CONFIG.items() if k != 'fullwidth'}
     dflt = call('/api/preview', {'path': files[0], 'config': no_key})
-    d_cols = {c['name']: c for c in dflt['columns']}
-    check('服务层默认开着全角 (配置里不传该键)',
-          dflt['report']['fullwidth_cells'] > 0
-          and any(s['after']['s'] == '2023-01-08' for s in d_cols['交易日期']['samples']
-                  if s['changed']), dflt['report'])
+    check('服务层默认关着全角 (配置里不传该键)',
+          dflt['report']['fullwidth_cells'] == 0, dflt['report'])
     fw = call('/api/preview', {'path': files[0], 'config': dict(CONFIG, fullwidth=True)})
     fw_cols = {c['name']: c for c in fw['columns']}
-    check('全角通道有计数', fw['report']['fullwidth_cells'] > 0, fw['report'])
-    check('默认开 与 显式开 结果一致', fw['report']['fullwidth_cells']
-          == dflt['report']['fullwidth_cells'], (fw['report'], dflt['report']))
-    check('全角日期在开启后可识别',
+    check('显式开启后全角通道有计数', fw['report']['fullwidth_cells'] > 0, fw['report'])
+    check('默认关 与 显式关 结果一致', fw['report']['fullwidth_cells']
+          > dflt['report']['fullwidth_cells'], (fw['report'], dflt['report']))
+    check('全角日期在显式开启后才被识别',
           any(s['after']['s'] == '2023-01-08' for s in fw_cols['交易日期']['samples']
               if s['changed']), fw_cols['交易日期']['samples'])
-    check('全角代码转完仍受标识符保护', fw_cols['代码']['changed'] == 0
-          or all(s['after']['s'].startswith('0') for s in fw_cols['代码']['samples']),
-          fw_cols['代码']['samples'])
+    # 拆成两条各自必跑的断言 (旧写法 changed == 0 or all(...) 的短路让后半句
+    # 在正常情形永不执行, 样本级保护实际没被验证过)
+    code_fw = fw_cols['代码']
+    check('全角开启后代码列零改动 (标识符保护仍在)', code_fw['changed'] == 0, code_fw)
+    check('全角开启后代码列逐格原样 (样本 after == before)',
+          all(s['after']['s'] == s['before']['s'] for s in code_fw['samples']),
+          code_fw['samples'])
 
     # 7) 输出格式可选
     csv_plan = call('/api/collect', {'files': [files[2]], 'dirs': [], 'recursive': True,
@@ -334,6 +337,47 @@ def main():
     check('同名文件 run 无失败', not [e for e in ev2 if e['kind'] == 'file_error'], ev2)
     outs2 = sorted(f for f in os.listdir(dup_out) if f.endswith('_cleaned.csv'))
     check('同名文件输出互不覆盖 (不同子目录)', len(outs2) == 2 and outs2[0] != outs2[1], outs2)
+
+    # 9) 拖拽上传: 同名不静默覆盖 (自动加序号), 且并发拖入同名也互不覆盖。
+    #    回归: 旧实现 exists 检查与落盘之间有竞态窗口, 同一秒并发拖入的同名
+    #    文件会双双通过检查, 后写者静默覆盖先写者。
+    def multipart_upload(filename, body, count=1):
+        boundary = '----sc-selftest'
+        chunks = []
+        for _ in range(count):
+            chunks.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="files"; '
+                f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+                .encode('utf-8') + body + b'\r\n')
+        chunks.append(f'--{boundary}--\r\n'.encode('utf-8'))
+        req = urllib.request.Request(BASE + '/api/upload', data=b''.join(chunks), method='POST')
+        req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+
+    up = multipart_upload('自测上传.csv', b'a,b\n1,2\n', count=2)
+    up_names = [os.path.basename(p) for p in up['paths']]
+    check('上传同名不覆盖 (自动加序号)', len(up_names) == 2 and len(set(up_names)) == 2, up)
+    check('上传文件真实落盘', all(os.path.isfile(p) for p in up['paths']), up)
+
+    got_up: list = []
+
+    def _upload_thread():
+        try:
+            got_up.append(multipart_upload('并发同名.csv', b'v\n1\n')['paths'])
+        except Exception as exc:                             # noqa: BLE001
+            got_up.append(exc)
+
+    threads = [threading.Thread(target=_upload_thread) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    ok_up = [paths for paths in got_up if isinstance(paths, list)]
+    check('并发同名上传两个请求都成功', len(ok_up) == 2, got_up)
+    up_flat = [p for paths in ok_up for p in paths]
+    check('并发同名上传互不覆盖 (2 个请求 -> 2 个不同文件)',
+          len(up_flat) == 2 and len(set(up_flat)) == 2, got_up)
 
     print(f'\n全部通过。输出目录: {out_dir}')
     print('  ' + '\n  '.join(written))

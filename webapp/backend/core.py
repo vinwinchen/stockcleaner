@@ -13,9 +13,10 @@
    不能在传给前端的最后一步丢掉。
 """
 
+import logging
 import os
 import glob as globlib
-import traceback
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -40,10 +41,9 @@ DEFAULT_CONFIG = {
     'drop_empty_rows': True,
     'drop_empty_cols': False,
     'normalize_dates': True,
-    # 产品默认开; 内核 cleaner_core.clean_table 的缺省仍是"不传就不做"。
-    # 两边故意不一样: 直接调内核的代码不该意外拿到被改写过文本的表,
-    # 而界面上这个开关是可见、可关的, 且转换格数一律计入报告。
-    'fullwidth': True,
+    # 产品默认关: 开启后名称/备注这类文本列里的全角括号与字母同样被改写,
+    # 影响面大, 交给用户在界面上显式开启 (内核缺省同样是不传就不做)。
+    'fullwidth': False,
     'output_format': 'keep',      # keep | xlsx | csv | both
     'column_overrides': {},       # {列名: {'protect': True}}
     'sample_rows': DEFAULT_SAMPLE_ROWS,
@@ -679,5 +679,37 @@ def plan_outputs(paths, output_dir, roots, output_format='keep'):
     return plan
 
 
+# 意外异常的完整堆栈落这里 (FileHandler 带 delay: 真发生异常才建文件)。
+_ERROR_LOG_PATH = os.path.join(tempfile.gettempdir(), 'StockCleaner', 'backend.log')
+
+
+def _setup_error_log():
+    logger = logging.getLogger('stockcleaner')
+    if logger.handlers:                    # 重复 import 不重复挂 handler
+        return logger
+    try:
+        os.makedirs(os.path.dirname(_ERROR_LOG_PATH), exist_ok=True)
+        handler: logging.Handler = logging.FileHandler(
+            _ERROR_LOG_PATH, encoding='utf-8', delay=True)
+    except OSError:                        # 临时目录不可写时退回 stderr, 不拦住服务
+        handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
+
+_ERROR_LOG = _setup_error_log()
+
+
 def error_text(exc):
-    return ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+    """用户可读的错误文本, 同时给意外异常做日志分流。
+
+    ValueError 是内核/编排层刻意抛的, 消息本来就是写给用户看的, 原样直出;
+    其余异常属于"不该发生的内部错误": 页面只回一行泛化提示 + 异常类型名,
+    完整堆栈写进日志文件, 不把内部路径/状态细节整段暴露给前端。
+    """
+    if isinstance(exc, ValueError):
+        return str(exc).strip() or type(exc).__name__
+    _ERROR_LOG.error('未预期的内部错误', exc_info=exc)
+    return f'内部错误 ({type(exc).__name__})；完整信息见日志: {_ERROR_LOG_PATH}'

@@ -1,0 +1,19 @@
+# 备选: 不走 uv 时可用  pip install -r requirements.txt
+# 工作区规范优先 uv:   uv venv && uv pip install -r requirements.txt
+#
+# pandas 上限 <4 是有原因的, 不是随手写的: 内核对读取阶段的语义依赖
+#   - dtype=object 不做类型推断 (前导零),
+#   - keep_default_na=False 的缺失值处理,
+#   - read_csv 对重复表头的去重口径 (代码, 代码.1),
+# 这三条在 2.x -> 3.0 之间真的变过 (3.0 默认字符串 dtype 与 copy-on-write),
+# 而 cleaner_core 的"读取阶段零破坏"整条原则都压在它们身上。测试实测跑在 3.0.5。
+pandas>=2.2,<4
+openpyxl>=3.1
+xlrd>=2.0
+# Excel 读取加速 (Rust 引擎)。可选: 没装时 _read_excel 会自动退回 openpyxl,
+# 但必须配 dtype=object, 否则 000001 这类代码会被读成 1。
+python-calamine>=0.2
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+pywebview>=5.1

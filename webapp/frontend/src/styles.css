@@ -1,0 +1,413 @@
+@import 'tailwindcss';
+
+/* ============================================================
+   StockCleaner 设计令牌
+   冷中性 (zinc 一族) + 单一强调色。红/绿只用于状态图标,
+   绝不用于数据数值着色: A 股语境红涨绿跌, 在本工具里会误读。
+   中文字体走系统 (PingFang SC / Microsoft YaHei), 拉丁字与数字
+   走自托管 Geist; 不自托管中文 webfont (几 MB, 桌面壳首帧不值)。
+
+   主题解析顺序 (关键): :root 先给亮色, 再由 prefers-color-scheme
+   在"用户还没手动选过"时切到暗色, 最后 [data-theme] 是显式覆盖。
+   这样首帧就是对的, 不存在"JS 迟到导致先暗后亮"的一帧。
+   实测教训: 把 :root 默认写成暗色会让偏好亮色的客户端闪一帧暗主题,
+   而且 Chrome 会按切换前的 color-scheme 缓存表单控件底色, 留下
+   "页面亮、输入框暗"的脏块。
+   ============================================================ */
+
+@layer tokens {
+  :root {
+    --bg: #f4f6f8;
+    --surface: #fcfdfd;
+    --surface-2: #eff2f5;
+    --surface-3: #e5e9ee;
+    --line: #dde2e8;
+    --line-2: #c6ccd5;
+    --ink: #13171c;
+    --muted: #454e5a;
+    /* #616b79 on #fcfdfd = 5.4:1, 满足 AA 小字 */
+    --faint: #616b79;
+    --accent: #1e6fbe;
+    --accent-soft: #3c86d0;
+    --on-accent: #f8fafc;
+    --ok: #1d7a54;
+    --warn: #8f6410;
+    --err: #b13f39;
+    --changed: rgba(30, 111, 190, 0.09);
+    --changed-line: rgba(30, 111, 190, 0.34);
+    --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(15, 23, 42, 0.35);
+    color-scheme: light;
+  }
+
+  /* 系统偏好暗色且用户没手动选过 -> 暗色 */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      --bg: #0b0d10;
+      --surface: #101318;
+      --surface-2: #151a21;
+      --surface-3: #1b222c;
+      --line: #222a34;
+      --line-2: #2f3a47;
+      --ink: #e8ebf0;
+      --muted: #a8b2c0;
+      /* --faint 只给 11~11.5px 的次要文字用, 对比度按 AA 小字算过:
+         #7c8797 on #101318 = 5.1:1, 再浅就掉出 4.5:1 */
+      --faint: #7c8797;
+      --accent: #4c9be8;
+      --accent-soft: #7cb6f0;
+      --on-accent: #07111d;
+      --ok: #45b184;
+      --warn: #d7a343;
+      --err: #e0665f;
+      --changed: rgba(76, 155, 232, 0.13);
+      --changed-line: rgba(76, 155, 232, 0.42);
+      --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 12px 32px -18px rgba(0, 0, 0, 0.8);
+      color-scheme: dark;
+    }
+  }
+
+  /* 显式覆盖: 用户点了切换, 或打包时用 SC_THEME 钉死默认主题 */
+  :root[data-theme='dark'] {
+    --bg: #0b0d10;
+    --surface: #101318;
+    --surface-2: #151a21;
+    --surface-3: #1b222c;
+    --line: #222a34;
+    --line-2: #2f3a47;
+    --ink: #e8ebf0;
+    --muted: #a8b2c0;
+    --faint: #7c8797;
+    --accent: #4c9be8;
+    --accent-soft: #7cb6f0;
+    --on-accent: #07111d;
+    --ok: #45b184;
+    --warn: #d7a343;
+    --err: #e0665f;
+    --changed: rgba(76, 155, 232, 0.13);
+    --changed-line: rgba(76, 155, 232, 0.42);
+    --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 12px 32px -18px rgba(0, 0, 0, 0.8);
+    color-scheme: dark;
+  }
+
+  :root[data-theme='light'] {
+    --bg: #f4f6f8;
+    --surface: #fcfdfd;
+    --surface-2: #eff2f5;
+    --surface-3: #e5e9ee;
+    --line: #dde2e8;
+    --line-2: #c6ccd5;
+    --ink: #13171c;
+    --muted: #454e5a;
+    --faint: #616b79;
+    --accent: #1e6fbe;
+    --accent-soft: #3c86d0;
+    --on-accent: #f8fafc;
+    --ok: #1d7a54;
+    --warn: #8f6410;
+    --err: #b13f39;
+    --changed: rgba(30, 111, 190, 0.09);
+    --changed-line: rgba(30, 111, 190, 0.34);
+    --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(15, 23, 42, 0.35);
+    color-scheme: light;
+  }
+}
+
+@theme inline {
+  --font-sans: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'Cascadia Mono', 'JetBrains Mono', 'Menlo',
+    'Microsoft YaHei', monospace;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface2: var(--surface-2);
+  --color-surface3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line2: var(--line-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accentsoft: var(--accent-soft);
+  --color-onaccent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+
+  /* 形状锁定: 面板 12 / 控件 8 / 徽标 6, 全站不用 pill */
+  --radius-panel: 12px;
+  --radius-control: 8px;
+  --radius-chip: 6px;
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  /* 数字一律等宽: 对齐比"看起来好看"重要 */
+  .num,
+  td.num,
+  span.num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  ::selection {
+    background: var(--changed-line);
+    color: var(--ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-2);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--faint);
+    background-clip: content-box;
+  }
+}
+
+/* ============================================================
+   控件: 一套尺寸, 一套圆角, 一套交互态
+   ============================================================ */
+@layer components {
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.005em;
+  }
+
+  .hint {
+    font-size: 11.5px;
+    color: var(--faint);
+    line-height: 1.5;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: var(--radius-chip);
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .chip-accent {
+    border-color: var(--changed-line);
+    background: var(--changed);
+    color: var(--accent-soft);
+  }
+  .chip-warn {
+    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
+    color: var(--warn);
+  }
+  .chip-err {
+    border-color: color-mix(in srgb, var(--err) 40%, transparent);
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    color: var(--err);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--line-2);
+    background: var(--surface-2);
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.1s ease,
+      opacity 0.14s ease;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: var(--faint);
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+    font-weight: 600;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: var(--accent-soft);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--muted);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--surface-2);
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .input {
+    width: 100%;
+    height: 30px;
+    padding: 0 9px;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 12.5px;
+    font-family: inherit;
+    transition: border-color 0.14s ease, background-color 0.14s ease;
+  }
+  .input::placeholder {
+    color: var(--faint);
+  }
+  .input:hover {
+    border-color: var(--line-2);
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--surface);
+  }
+  .input-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 单元格级差异着色: 变更格用强调色底, 不用文字色 (避免与红涨绿跌冲突) */
+  .cell-changed {
+    background: var(--changed);
+    box-shadow: inset 2px 0 0 var(--changed-line);
+  }
+
+  .row-line + .row-line {
+    border-top: 1px solid var(--line);
+  }
+
+  .stale {
+    opacity: 0.5;
+    transition: opacity 0.2s ease;
+  }
+
+  /* 滚动区底部的渐隐提示: 面板被裁到一半时, 用户得知道下面还有东西。
+     用 mask 而不是叠一层渐变, 是为了在两种主题下都不用改颜色。 */
+  .scroll-fade {
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 34px), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 34px), transparent 100%);
+  }
+}
+
+/* ============================================================
+   动效: 只服务反馈与状态转换, 全部尊重 prefers-reduced-motion
+   ============================================================ */
+@keyframes sc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sc-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+@keyframes sc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.anim-rise {
+  animation: sc-rise 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.anim-sweep {
+  animation: sc-sweep 1.15s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.anim-pulse {
+  animation: sc-pulse 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-rise,
+  .anim-sweep,
+  .anim-pulse {
+    animation: none !important;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

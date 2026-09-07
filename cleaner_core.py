@@ -896,8 +896,18 @@ def _revert_protected(df, orig_protected, report):
             '已保护的列被"删除全空列"删掉了: ' + ', '.join(lost_cols) + ' (请关掉该选项或检查该列)')
 
 
-def clean_table(df, config):
-    """按配置清洗 df, 返回 (df, report)。管道顺序: 裁剪 -> 去空 -> 去字符 -> 数值化 -> 日期 -> 列保护回退。"""
+def clean_table(df, config, progress=None):
+    """按配置清洗 df, 返回 (df, report)。管道顺序: 裁剪 -> 去空 -> 去字符 -> 数值化 -> 日期 -> 列保护回退。
+
+    progress: 可选 (frac, stage) 回调, frac 在 0..1 内单调不减, 供批量任务做阶段级
+    进度; None 时零开销 (预览路径不传)。内核是向量化管道, 没有逐行循环可挂,
+    所以进度以"阶段"为粒度 —— 粒度粗但真实, 不造假进度。
+    """
+
+    def tick(frac, stage):
+        if progress is not None:
+            progress(frac, stage)
+
     report = {'rows_in': len(df), 'rows_out': len(df), 'cols_out': df.shape[1],
               'dropped_rows': 0,
               'fullwidth_cells': 0, 'fullwidth_columns': [],
@@ -938,6 +948,7 @@ def clean_table(df, config):
     if df.shape[1] == 0:
         raise ValueError("清洗后所有列均为空 (全表空值?), 已跳过该文件")
     report['dropped_rows'] = report['rows_in'] - len(df)
+    tick(0.15, 'prepare')
 
     # --- 全角转半角 (显式开启, 默认关); 必须在去字符与数值化之前 ---
     # 受保护的列不参与: 这些列最终整列回退为原值, 算进 fullwidth_cells 会让
@@ -947,6 +958,7 @@ def clean_table(df, config):
         n_fw, touched = normalize_fullwidth(df, fw_cols)
         report['fullwidth_cells'] = n_fw
         report['fullwidth_columns'] = touched
+    tick(0.3, 'fullwidth')
 
     # --- 去字符 (用户显式意图); 与单位换算互斥感知, 防止先把 "万" 删掉 ---
     tokens = list(config.get('strip_tokens') or [])
@@ -978,6 +990,7 @@ def clean_table(df, config):
     for u in blocked:
         report['warnings'].append(
             f"字符 \"{u}\" 已由单位换算处理, 未作为去字符目标 (避免先删后换算失效)")
+    tick(0.45, 'strip')
 
     # --- 数值化 (本质操作, 含千分位/全角/货币/单位) ---
     if config.get('numericize', True):
@@ -987,6 +1000,7 @@ def clean_table(df, config):
         report['id_columns'] = rep['id_columns']
         report['collision_columns'] = rep['collision_columns']
         report['warnings'].extend(rep['warnings'])
+    tick(0.7, 'numericize')
 
     # --- 日期统一 (内容驱动) ---
     if config.get('normalize_dates'):
@@ -998,31 +1012,43 @@ def clean_table(df, config):
             report['warnings'].append(
                 f'列 "{c["from"]}" 含时间分量, 已拆成 "{c["from"]}" (日期) + '
                 f'"{c["to"]}" (HH:MM:SS) 两列, 共 {c["cells"]} 格')
+    tick(0.85, 'dates')
 
     # --- 列保护回退 (管道最后一步, 只覆盖幸存行) ---
     if orig_protected:
         _revert_protected(df, orig_protected, report)
+    tick(0.95, 'protect')
 
     report['rows_out'] = len(df)
     report['cols_out'] = df.shape[1]        # 日期/时间拆列会加列, 这里才是终值
     return df, report
 
 
-def process_file(file_path, output_dir, config):
+def process_file(file_path, output_dir, config, progress=None):
     """单文件完整流程: 读取 -> 清洗 -> 保存。返回 (report, 主输出路径)。
 
     output_format='both' 时第二个输出放在 report['extra_outputs'],
     返回值固定是 (report, 主输出路径) 两元组: 调用方只关心"这个文件写到哪了",
     附加产物属于报告细节, 不该改变函数形状。
+    progress: 可选 (frac, stage) 回调, 全程 0..1 单调: 读取 0-0.2, 清洗 0.2-0.85,
+    写盘 0.85-1。预览路径不传, 行为零变化。
     """
     df, meta = read_table(file_path)
     if df is None or df.empty:
         raise ValueError("文件为空或无法读取")
-    df, report = clean_table(df, config)
+    if progress:
+        progress(0.2, 'read')
+    df, report = clean_table(
+        df, config,
+        progress=(lambda f, s: progress(0.2 + 0.65 * f, s)) if progress else None)
     # 批量模式防冲突: config['stem_map'] 为重名文件提供唯一输出名
     stem = (config.get('stem_map') or {}).get(os.path.abspath(file_path))
+    if progress:
+        progress(0.85, 'write')
     out_paths = save_table(df, file_path, output_dir, stem,
                            config.get('output_format', 'keep'))
+    if progress:
+        progress(1.0, 'save')
     report['warnings'].extend(meta.get('warnings') or [])
     if len(out_paths) > 1:
         report['extra_outputs'] = out_paths[1:]

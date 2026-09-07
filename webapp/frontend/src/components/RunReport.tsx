@@ -17,6 +17,12 @@ export type RunSummary = {
   outputDir: string
   elapsed: number
   outcomes: FileOutcome[]
+  /** 当前文件内的阶段进度 0..1; 文件完成即归零, 只在 running 时计入总进度 */
+  fileFrac: number
+  /** 当前文件的阶段标识 (read/prepare/numericize/.../write/save) */
+  stage: string | null
+  /** 正在处理的文件名 (file_start 带来, 完成后清空) */
+  activeName: string | null
   /** 重连时缓冲被截断, 前面的事件没拿到 —— 报告只能算"最近这一段" */
   partial: boolean
   notes: string[]
@@ -25,7 +31,19 @@ export type RunSummary = {
 export const EMPTY_RUN: RunSummary = {
   jobId: null, total: 0, done: 0, ok: 0, failed: 0,
   status: 'idle', outputDir: '', elapsed: 0, outcomes: [],
+  fileFrac: 0, stage: null, activeName: null,
   partial: false, notes: [],
+}
+
+/** 内核阶段标识 -> 界面文案 */
+export const STAGE_LABEL: Record<string, string> = {
+  read: '读取中', prepare: '预处理', fullwidth: '全角转半角', strip: '去字符',
+  numericize: '数值化', dates: '日期统一', protect: '列保护回退',
+  write: '写盘中', save: '收尾',
+}
+
+export function stageLabel(stage: string | null): string {
+  return (stage && STAGE_LABEL[stage]) || '处理中'
 }
 
 /** 把 SSE 事件流折叠成一份运行汇总。事件可重放，所以这里必须幂等。
@@ -47,13 +65,26 @@ export function reduceRunEvents(prev: RunSummary, e: JobEvent): RunSummary {
       next.done = 0
       next.ok = 0
       next.failed = 0
+      next.fileFrac = 0
+      next.stage = null
+      next.activeName = null
       next.partial = false
       next.notes = []
+      break
+    case 'file_start':
+      next.fileFrac = 0
+      next.stage = null
+      next.activeName = e.name ?? null
+      break
+    case 'file_progress':
+      next.fileFrac = Math.min(1, Math.max(0, e.frac ?? next.fileFrac))
+      next.stage = e.stage ?? next.stage
       break
     case 'progress':
       next.done = e.done ?? next.done
       next.ok = e.ok ?? next.ok
       next.failed = e.failed ?? next.failed
+      next.fileFrac = 0
       break
     case 'file_done': {
       const outcome: FileOutcome = {
@@ -64,6 +95,9 @@ export function reduceRunEvents(prev: RunSummary, e: JobEvent): RunSummary {
       const idx = at(next.outcomes)
       if (idx >= 0) next.outcomes[idx] = outcome
       else next.outcomes.push(outcome)
+      next.fileFrac = 0
+      next.stage = null
+      next.activeName = null
       break
     }
     case 'file_error': {
@@ -71,6 +105,9 @@ export function reduceRunEvents(prev: RunSummary, e: JobEvent): RunSummary {
       const idx = at(next.outcomes)
       if (idx >= 0) next.outcomes[idx] = outcome
       else next.outcomes.push(outcome)
+      next.fileFrac = 0
+      next.stage = null
+      next.activeName = null
       break
     }
     case 'replay_gap':
@@ -84,6 +121,7 @@ export function reduceRunEvents(prev: RunSummary, e: JobEvent): RunSummary {
     case 'job_end':
       next.status = e.cancelled ? 'cancelled' : 'done'
       next.elapsed = e.elapsed ?? next.elapsed
+      next.fileFrac = 0
       break
     default:
       break
@@ -196,7 +234,8 @@ export function RunReport({
           <>
             {run.failed > 0 && <Chip tone="err"><XCircle size={11} />{fmtInt(run.failed)} 失败</Chip>}
             <Chip tone={run.status === 'running' ? 'accent' : 'neutral'}>
-              {run.status === 'running' ? '处理中' : run.status === 'cancelled' ? '已中止' : '完成'}
+              {run.status === 'running' ? stageLabel(run.stage)
+                : run.status === 'cancelled' ? '已中止' : '完成'}
             </Chip>
           </>
         }

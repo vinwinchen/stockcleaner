@@ -112,6 +112,18 @@ class Job:
         self._note(status=status)
         self.publish('job_end', payload)
 
+    def _progress_reporter(self, index):
+        """把内核的阶段进度回调翻译成 file_progress 事件。
+
+        阶段事件每文件只有固定的几条 (约 8 个), 不需要节流; 重放窗口截断最多
+        丢掉中间某条 frac, file_done 必然跟着一条 progress 事件收口, 进度条不会悬空。
+        """
+        def report(frac, stage):
+            self.publish('file_progress', {'index': index,
+                                           'frac': round(min(1.0, max(0.0, frac)), 3),
+                                           'stage': stage})
+        return report
+
     def _run(self):
         # 批量模式不同子目录同名文件防覆盖 (带输出格式判定: 只拦真的会互覆的组合)
         stem_map, _renamed = build_stem_map(
@@ -128,7 +140,8 @@ class Job:
             self.publish('file_start', {'index': index, 'name': os.path.basename(path),
                                         'path': path})
             try:
-                payload = run_file(path, self.output_dir, self.config)
+                payload = run_file(path, self.output_dir, self.config,
+                                   progress=self._progress_reporter(index))
                 self._note(ok=self.ok + 1, done=self.done + 1)
                 self.publish('file_done', {'index': index, **payload})
             except Exception as exc:                        # noqa: BLE001

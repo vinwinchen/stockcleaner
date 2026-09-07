@@ -398,14 +398,16 @@ def _preview_report(report, read_warnings, path, output_format):
 
 # ---------------------------------------------------------------- 正式运行
 
-def run_file(path, output_dir, cfg):
+def run_file(path, output_dir, cfg, progress=None):
     """全量处理一个文件, 返回结构化报告并登记产出。
 
     走的就是内核那个 process_file: 预览与正式运行共用同一实现, 服务层不另开一条路。
+    progress: 透传给内核的阶段进度回调 (frac, stage), 批量任务用它发布细粒度进度。
     """
     from . import manifest
 
-    report, out_path = process_file(path, output_dir, kernel_config(cfg))
+    report, out_path = process_file(path, output_dir, kernel_config(cfg),
+                                    progress=progress)
     all_outputs = [out_path] + list(report.get('extra_outputs') or [])
     try:
         manifest.record(output_dir, path, all_outputs)

@@ -111,8 +111,8 @@ export type Config = {
 
 export type JobEvent = {
   seq: number
-  kind: 'hello' | 'job_start' | 'file_start' | 'file_done' | 'file_error' | 'progress'
-    | 'job_end' | 'note' | 'replay_gap'
+  kind: 'hello' | 'job_start' | 'file_start' | 'file_progress' | 'file_done'
+    | 'file_error' | 'progress' | 'job_end' | 'note' | 'replay_gap'
   at: number
   job_id?: string
   total?: number
@@ -120,6 +120,10 @@ export type JobEvent = {
   index?: number
   name?: string
   path?: string
+  /** file_progress: 当前文件内的阶段进度 0..1 (读取/清洗各阶段/写盘) */
+  frac?: number
+  /** file_progress: 阶段标识 (read/prepare/numericize/.../write/save) */
+  stage?: string
   /** progress 事件里是"已成功文件数"; file_done 的 ok 由 kind 本身表达, 不进类型 */
   ok?: number
   failed?: number

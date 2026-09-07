@@ -1,6 +1,6 @@
 [project]
 name = "stockcleaner-webapp"
-version = "2.2.0"
+version = "2.2.2"
 description = "StockCleaner 的 Web 前端 + 本地服务层 (清洗内核复用 ../cleaner_core.py)"
 requires-python = ">=3.11"
 dependencies = [

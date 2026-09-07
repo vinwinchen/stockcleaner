@@ -8,7 +8,7 @@ import { FileQueue } from './components/FileQueue'
 import { DEFAULT_CONFIG, RulePanel, pickNative } from './components/RulePanel'
 import { ColumnInspector } from './components/ColumnInspector'
 import { DiffGrid } from './components/DiffGrid'
-import { EMPTY_RUN, RunReport, reduceRunEvents, reportToText } from './components/RunReport'
+import { EMPTY_RUN, RunReport, reduceRunEvents, reportToText, stageLabel } from './components/RunReport'
 import { BrowseDialog } from './components/BrowseDialog'
 import { api, revealInExplorer, uploadDropped, pushJobEvents } from './api'
 import { DASH, delimLabel, dirname, fmtInt } from './lib/format'
@@ -147,9 +147,21 @@ export default function App() {
   const addSources = useCallback(
     async (patch: Partial<Sources>) => {
       // 只改来源; 队列重建统一交给下面的 effect, 避免同一份清单被算两遍
+      const files = patch.files ?? []
+      const dirs = patch.dirs ?? []
+      // 显式重新加入的路径要同时从排除名单里捞回, 否则"移除后再载入同一文件"
+      // 会被 rebuild 的 drop 过滤永远挡在队列外, 队列空了预览也就无从谈起
+      if (files.length || dirs.length) {
+        setExcluded((prev) => {
+          const kept = prev.filter(
+            (p) => !files.includes(p) && !dirs.some((d) => underDir(p, d)),
+          )
+          return kept.length === prev.length ? prev : kept
+        })
+      }
       setSources((prev) => ({
-        files: [...prev.files, ...(patch.files ?? [])],
-        dirs: [...prev.dirs, ...(patch.dirs ?? [])],
+        files: [...prev.files, ...files],
+        dirs: [...prev.dirs, ...dirs],
       }))
     },
     [],
@@ -166,9 +178,18 @@ export default function App() {
   useEffect(() => {
     if (!items.length) {
       setFocus(null)
+      // 移除/清空后顶部不能残留已不在队列里的文件信息
+      setPreview(null)
+      setPreviewErr(null)
       return
     }
-    if (!focus || !items.some((i) => i.path === focus)) setFocus(items[0].path)
+    if (!focus || !items.some((i) => i.path === focus)) {
+      // 当前 focus 被移除: 先清掉旧预览再落到下一个文件, 不然 300ms 防抖期间
+      // 顶部显示的还是刚被移除的那个文件
+      setPreview(null)
+      setPreviewErr(null)
+      setFocus(items[0].path)
+    }
   }, [items, focus])
 
   useEffect(() => {
@@ -228,13 +249,17 @@ export default function App() {
   }
 
   const removeOne = async (path: string) => {
-    const drop = [...excluded, path]
-    setExcluded(drop)
+    // 作废在飞的预览请求: 不然它回来时 seq 仍匹配, 会把已移除文件的信息重新写回顶部
+    reqSeq.current++
+    // 记入排除名单是为了文件夹来源: 之后的重扫不再把手动删过的文件捞回来;
+    // 文件来源则直接从 sources 里摘掉。函数式更新防连续删除时用旧值。
+    setExcluded((prev) => (prev.includes(path) ? prev : [...prev, path]))
     setItems((prev) => prev.filter((i) => i.path !== path))
     if (sources.files.includes(path)) setSources((prev) => ({ ...prev, files: prev.files.filter((f) => f !== path) }))
   }
 
   const clearAll = () => {
+    reqSeq.current++
     setSources({ files: [], dirs: [] })
     setExcluded([])
     setItems([])
@@ -314,7 +339,10 @@ export default function App() {
   )
   const sampleChanges = (preview?.columns ?? []).reduce((sum, c) => sum + c.changed, 0)
   const running = run.status === 'running'
-  const progress = run.total ? run.done / run.total : 0
+  // 总进度 = 已完成文件 + 当前文件内的阶段进度 (内核阶段回调), 单文件批次也能渐进推进
+  const progress = run.total
+    ? Math.min(1, (run.done + (running ? run.fileFrac : 0)) / run.total)
+    : 0
   const overwriteCount = items.filter((i) => i.exists).length
   const busy = previewBusy || running
 
@@ -527,13 +555,20 @@ export default function App() {
       <footer className="flex h-[56px] shrink-0 items-center gap-4 border-t border-line bg-surface px-4">
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <div className="flex items-baseline gap-2 text-[11.5px] text-muted">
-            <span className="num">
+            <span className="num shrink-0">
               {run.status === 'idle'
                 ? `${fmtInt(items.length)} 个文件待处理`
                 : `${fmtInt(run.done)} / ${fmtInt(run.total)} 完成，失败 ${fmtInt(run.failed)}`}
             </span>
+            {running && run.activeName && (
+              <span className="min-w-0 truncate text-faint">
+                {stageLabel(run.stage)} · {run.activeName}
+              </span>
+            )}
             {run.status !== 'idle' && run.elapsed > 0 && (
-              <span className="num text-faint">{run.elapsed.toFixed(2)}s</span>
+              <span className="num ml-auto shrink-0 text-faint">
+                用时 {run.elapsed.toFixed(2)}s
+              </span>
             )}
           </div>
           <div
@@ -594,4 +629,10 @@ export default function App() {
 
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+// p 是否位于 dir 之下 (重新加入文件夹时, 判断哪些排除项该被捞回)
+function underDir(p: string, dir: string): boolean {
+  const stem = dir.replace(/[\\/]+$/, '')
+  return p.startsWith(stem + '\\') || p.startsWith(stem + '/')
 }

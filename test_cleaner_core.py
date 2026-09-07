@@ -768,6 +768,43 @@ def test_utf16_bom_read_and_binary_reject():
     print('[ok] 带 BOM 的 UTF-16 可读; 无 BOM/伪 BOM/截断仍按二进制拒读')
 
 
+def test_progress_callback_monotonic():
+    """阶段进度回调: frac 单调不减、process_file 收于 1.0; 不传回调行为零变化。
+
+    内核是向量化管道, 进度只能以"阶段"为粒度 —— 这里钉住的是回调协议本身:
+    (frac, stage) 序列合法、端点正确, 前端进度条才不会倒退或悬空。
+    """
+    df = pd.DataFrame({'code': ['000001', '600519'],
+                       'amt': ['1,234', '1.5万'],
+                       '交易日期': ['2023-01-01', '2023/2/3']})
+
+    seen = []
+    out, rep = clean_table(df, dict(BASE_CFG, normalize_dates=True),
+                           progress=lambda f, s: seen.append((f, s)))
+    assert rep['rows_out'] == 2
+    fracs = [f for f, _ in seen]
+    assert fracs == sorted(fracs), seen
+    assert all(0.0 <= f <= 1.0 for f in fracs), seen
+    assert fracs[-1] == 0.95, seen                        # clean_table 只负责清洗段
+    assert len({s for _, s in seen}) >= 3, seen           # 至少跨 3 个阶段
+
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'p.csv')
+    df.to_csv(src, index=False, encoding='utf-8-sig')
+    events = []
+    _rep, out_path = process_file(src, tmp, dict(BASE_CFG, normalize_dates=True),
+                                  progress=lambda f, s: events.append((f, s)))
+    assert os.path.exists(out_path)
+    pe = [f for f, _ in events]
+    assert pe == sorted(pe), events
+    assert pe[0] > 0.0 and pe[-1] == 1.0, events          # 全程从读取走到写完
+
+    # 缺省不传: 不炸、结果与传 None 一致
+    out2, rep2 = clean_table(df, dict(BASE_CFG))
+    assert rep2['rows_out'] == rep['rows_out']
+    print('[ok] 阶段进度回调单调且收于 1.0, 缺省零开销')
+
+
 if __name__ == '__main__':
     test_parse_numeric()
     test_numericize_id_column()
@@ -802,4 +839,5 @@ if __name__ == '__main__':
     test_protected_columns_never_enter_wash_channels()
     test_huge_decimal_with_fraction_keeps_original()
     test_utf16_bom_read_and_binary_reject()
+    test_progress_callback_monotonic()
     print('\n全部测试通过 ✔')

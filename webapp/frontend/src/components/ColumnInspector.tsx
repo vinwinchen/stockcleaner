@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  ArrowRight, LockSimple, LockSimpleOpen, ShieldCheck, CaretRight, Check,
+  ArrowRightIcon, LockSimpleIcon, LockSimpleOpenIcon, ShieldCheckIcon, CaretRightIcon, CheckIcon,
 } from '@phosphor-icons/react'
 import { Chip, SectionHead, cn } from './ui'
 import { DASH, fmtInt } from '../lib/format'
@@ -83,7 +83,7 @@ export function ColumnInspector({
                     aria-expanded={expanded}
                     className="flex min-w-0 flex-1 items-center gap-2 text-left"
                   >
-                    <CaretRight
+                    <CaretRightIcon
                       size={13}
                       weight="bold"
                       className={cn('shrink-0 text-faint transition-transform duration-150', expanded && 'rotate-90')}
@@ -99,7 +99,7 @@ export function ColumnInspector({
                               ? `日期含时间分量，这一列是从 "${col.split_from}" 拆出来的；原列只留日期`
                               : undefined}
                         >
-                          {col.id_protected && <ShieldCheck size={11} />}
+                          {col.id_protected && <ShieldCheckIcon size={11} />}
                           {KIND_LABEL[col.kind]}
                         </Chip>
                         {col.collision && (
@@ -129,7 +129,7 @@ export function ColumnInspector({
                         : 'border-line text-faint hover:border-line2 hover:text-muted',
                     )}
                   >
-                    {protectedNow ? <LockSimple size={13} weight="fill" /> : <LockSimpleOpen size={13} />}
+                    {protectedNow ? <LockSimpleIcon size={13} weight="fill" /> : <LockSimpleOpenIcon size={13} />}
                   </button>
                 </div>
 
@@ -147,7 +147,7 @@ function SampleTable({ col }: { col: ColumnInfo }) {
   if (!col.samples.length) {
     return (
       <div className="mx-3 mb-2 flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-surface2 px-2.5 py-2 text-[11.5px] text-faint">
-        <Check size={13} /> 该列没有任何单元格会被改动
+        <CheckIcon size={13} /> 该列没有任何单元格会被改动
       </div>
     )
   }
@@ -168,7 +168,7 @@ function SampleTable({ col }: { col: ColumnInfo }) {
             <td className="max-w-0 py-1 px-2 align-middle">
               <SampleValue s={s.before.s} t={s.before.t} faded={s.changed} />
             </td>
-            <td className="py-1 text-center">{s.changed ? <ArrowRight size={11} className="text-faint" /> : null}</td>
+            <td className="py-1 text-center">{s.changed ? <ArrowRightIcon size={11} className="text-faint" /> : null}</td>
             <td className="max-w-0 py-1 pr-2">
               {s.changed ? (
                 <SampleValue s={s.after.s} t={s.after.t} />

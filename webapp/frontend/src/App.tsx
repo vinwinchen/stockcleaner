@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  CircleNotch, Database, Moon, Sun, WarningCircle, X, Play, Stop,
-  Stack, GridFour, Scroll, ShieldCheck, ArrowsClockwise, Info,
+  CircleNotchIcon, DatabaseIcon, MoonIcon, SunIcon, WarningCircleIcon, XIcon, PlayIcon, StopIcon,
+  StackIcon, GridFourIcon, ScrollIcon, ShieldCheckIcon, ArrowsClockwiseIcon, InfoIcon,
 } from '@phosphor-icons/react'
 import { Button, Chip, EmptyState, FadeScroll, Segmented, SkeletonRows, Tooltip, cn } from './components/ui'
 import { FileQueue } from './components/FileQueue'
@@ -350,7 +350,7 @@ export default function App() {
     <div className="flex h-full flex-col">
       <header className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
         <div className="flex shrink-0 items-center gap-2">
-          <Database size={17} weight="duotone" className="text-accent" aria-hidden />
+          <DatabaseIcon size={17} weight="duotone" className="text-accent" aria-hidden />
           <span className="text-[14px] font-semibold tracking-[-0.01em]">StockCleaner</span>
           <Chip title="清洗内核版本 (来自 /api/meta, 与 APP_VERSION 同步)">
             内核 {version ? `v${version}` : '…'}
@@ -408,7 +408,7 @@ export default function App() {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {previewBusy && <CircleNotch size={14} weight="bold" className="animate-spin text-faint" aria-label="正在重算预览" />}
+          {previewBusy && <CircleNotchIcon size={14} weight="bold" className="animate-spin text-faint" aria-label="正在重算预览" />}
           {!nativeShell && (
             <Chip title="未接管到桌面壳，原生对话框不可用时退回内联目录浏览">浏览器模式</Chip>
           )}
@@ -416,8 +416,8 @@ export default function App() {
             value={theme}
             onChange={(v) => setTheme(v)}
             options={[
-              { value: 'dark', label: '暗', icon: <Moon size={13} />, title: '暗色' },
-              { value: 'light', label: '亮', icon: <Sun size={13} />, title: '亮色' },
+              { value: 'dark', label: '暗', icon: <MoonIcon size={13} />, title: '暗色' },
+              { value: 'light', label: '亮', icon: <SunIcon size={13} />, title: '亮色' },
             ]}
           />
         </div>
@@ -425,10 +425,10 @@ export default function App() {
 
       {notice && (
         <div className="flex shrink-0 items-center gap-2 border-b border-line bg-surface2 px-4 py-2 text-[12px]">
-          <Info size={14} className="shrink-0 text-accent" aria-hidden />
+          <InfoIcon size={14} className="shrink-0 text-accent" aria-hidden />
           <span className="min-w-0 flex-1">{notice}</span>
           <button type="button" className="shrink-0 text-faint hover:text-ink" onClick={() => setNotice(null)} aria-label="关闭提示">
-            <X size={13} />
+            <XIcon size={13} />
           </button>
         </div>
       )}
@@ -465,21 +465,21 @@ export default function App() {
               value={tab}
               onChange={setTab}
               options={[
-                { value: 'columns', label: '列检视', icon: <Stack size={13} /> },
-                { value: 'grid', label: '数据差异', icon: <GridFour size={13} /> },
-                { value: 'report', label: '运行报告', icon: <Scroll size={13} /> },
+                { value: 'columns', label: '列检视', icon: <StackIcon size={13} /> },
+                { value: 'grid', label: '数据差异', icon: <GridFourIcon size={13} /> },
+                { value: 'report', label: '运行报告', icon: <ScrollIcon size={13} /> },
               ]}
             />
             {stale && focus && <Chip tone="warn">规则已改，正在重算</Chip>}
             <span className="hint ml-auto hidden items-center gap-1.5 xl:flex">
-              <ShieldCheck size={13} className="shrink-0 text-faint" />
+              <ShieldCheckIcon size={13} className="shrink-0 text-faint" />
               解析失败一律保留原值，标识符列不会被吃成数字
             </span>
           </div>
 
           {!items.length ? (
             <EmptyState
-              icon={<Database size={30} weight="duotone" />}
+              icon={<DatabaseIcon size={30} weight="duotone" />}
               title="还没有待处理的文件"
               body="在左侧加入 CSV / TXT / XLSX。这里会先给出逐列的「原值 → 结果」对照，确认无误再写出文件。预览只读，不碰原始数据。"
               action={
@@ -493,10 +493,10 @@ export default function App() {
             <div className="flex min-h-0 flex-1 flex-col">
               {previewErr && (
                 <div className="m-3 flex shrink-0 items-start gap-2 rounded-[var(--radius-control)] border border-err/40 bg-err/10 px-3 py-2 text-[12px] text-err">
-                  <WarningCircle size={14} weight="fill" className="mt-[1px] shrink-0" />
+                  <WarningCircleIcon size={14} weight="fill" className="mt-[1px] shrink-0" />
                   <span className="min-w-0 flex-1">{previewErr}</span>
                   <Button size="sm" variant="ghost" onClick={() => focus && void runPreview(focus, config)}>
-                    <ArrowsClockwise size={13} /> 重试
+                    <ArrowsClockwiseIcon size={13} /> 重试
                   </Button>
                 </div>
               )}
@@ -589,7 +589,7 @@ export default function App() {
         <div className="flex shrink-0 items-center gap-2">
           {running ? (
             <Button onClick={() => void cancelRun()}>
-              <Stop size={14} weight="fill" /> 中止
+              <StopIcon size={14} weight="fill" /> 中止
             </Button>
           ) : (
             <Tooltip content={items.length && outputDir ? '按当前规则写出 _cleaned 文件' : '先加入文件并选择输出目录'}>
@@ -599,7 +599,7 @@ export default function App() {
                     目录互相顶掉进度流, 还会并发抢写产出登记。 */}
                 <Button variant="primary" disabled={!items.length || !outputDir || busy}
                   onClick={() => void startRun()}>
-                  <Play size={14} weight="fill" /> 开始清洗
+                  <PlayIcon size={14} weight="fill" /> 开始清洗
                 </Button>
               </span>
             </Tooltip>

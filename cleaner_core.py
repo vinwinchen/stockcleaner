@@ -28,6 +28,7 @@ import re
 import warnings
 from datetime import date, datetime
 from io import StringIO
+from typing import Literal, cast
 
 import pandas as pd
 
@@ -304,7 +305,7 @@ def numericize_dataframe(df, convert_units=True, skip_columns=None):
         ok = parsed.notna()
 
         values = series.astype(object).copy()
-        values.loc[ok.index[ok]] = parsed[ok].to_numpy()
+        values.loc[ok.index[ok]] = parsed.to_numpy()[ok.to_numpy()]
         df[col] = values
         report['numeric_cells'] += n_num
         report['unit_cells'] += n_unit
@@ -574,7 +575,9 @@ def _read_excel(path):
     for engine in order:
         try:
             # dtype=object: 阻止 pandas 读取阶段把 000001 推断成 1
-            return (pd.read_excel(path, engine=engine, dtype=object,
+            read_engine = (cast(Literal['xlrd', 'openpyxl', 'calamine', 'odf', 'pyxlsb'], engine)
+                           if engine else None)
+            return (pd.read_excel(path, engine=read_engine, dtype=object,
                                   keep_default_na=False), engine or 'auto')
         except Exception as exc:                            # noqa: BLE001
             last_error = exc

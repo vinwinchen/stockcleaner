@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  ArrowUp, HardDrives, CaretRight, X, Check, FolderSimple,
+  ArrowUpIcon, HardDrivesIcon, CaretRightIcon, XIcon, CheckIcon, FolderSimpleIcon,
 } from '@phosphor-icons/react'
 import { Button, cn } from './ui'
 import { api, type BrowseResult } from '../api'
@@ -73,13 +73,13 @@ export function BrowseDialog({
             {data?.path ?? DASH}
           </span>
           <button type="button" onClick={onClose} className="rounded-[6px] p-1 text-faint hover:bg-surface2 hover:text-ink" aria-label="关闭">
-            <X size={15} />
+            <XIcon size={15} />
           </button>
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-surface2 px-3 py-2">
           <Button size="sm" variant="ghost" onClick={() => go(data?.parent ?? null)} disabled={!data?.parent}>
-            <ArrowUp size={13} /> 上一级
+            <ArrowUpIcon size={13} /> 上一级
           </Button>
           {(data?.drives ?? []).map((d) => (
             <button
@@ -91,7 +91,7 @@ export function BrowseDialog({
                 data?.path?.toLowerCase().startsWith(d.path.toLowerCase()) && 'chip-accent',
               )}
             >
-              <HardDrives size={11} /> {d.name}
+              <HardDrivesIcon size={11} /> {d.name}
             </button>
           ))}
         </div>
@@ -110,9 +110,9 @@ export function BrowseDialog({
                   onClick={() => go(d.path)}
                   className="flex w-full items-center gap-2 border-b border-line/50 px-3 py-1.5 text-left text-[12.5px] hover:bg-surface2"
                 >
-                  <FolderSimple size={15} weight="fill" className="shrink-0 text-warn/70" />
+                  <FolderSimpleIcon size={15} weight="fill" className="shrink-0 text-warn/70" />
                   <span className="truncate">{d.name}</span>
-                  <CaretRight size={11} className="ml-auto shrink-0 text-faint" />
+                  <CaretRightIcon size={11} className="ml-auto shrink-0 text-faint" />
                 </button>
               </li>
             ))}
@@ -128,7 +128,7 @@ export function BrowseDialog({
                       on && 'bg-[var(--changed)] text-accentsoft',
                     )}
                   >
-                    {on ? <Check size={14} /> : <span className="w-[14px]" />}
+                    {on ? <CheckIcon size={14} /> : <span className="w-[14px]" />}
                     <span className="truncate">{f.name}</span>
                   </button>
                 </li>

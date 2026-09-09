@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """cleaner_core 的冒烟测试: python test_cleaner_core.py"""
 
+import io
 import os
 import sys
 import tempfile
@@ -13,7 +14,7 @@ import pandas as pd
 # GBK 控制台上打印 ✔ 会抛 UnicodeEncodeError, 让"全部通过"以退出码 1 收场。
 # 不改编码只兜错误: 终端里中文照常可读, 不可编码的字符降级成 ? 。
 for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, 'reconfigure'):
+    if isinstance(_stream, io.TextIOWrapper):
         _stream.reconfigure(errors='replace')
 
 

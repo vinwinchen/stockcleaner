@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Funnel, ShieldCheck, Tag, CalendarBlank, Scissors, Trash, WarningCircle, TextAa } from '@phosphor-icons/react'
+import { FunnelIcon, ShieldCheckIcon, TagIcon, CalendarBlankIcon, ScissorsIcon, TrashIcon, WarningCircleIcon, TextAaIcon } from '@phosphor-icons/react'
 import { Field, NumberInput, SectionHead, TextInput, Toggle } from './ui'
 import { api } from '../api'
 import { DASH } from '../lib/format'
@@ -67,7 +67,7 @@ export function RulePanel({
     <div className="flex flex-col divide-y divide-line border-t border-line">
       <SectionHead title="清洗规则" count={focusName ?? DASH} />
 
-      <Group icon={<Funnel size={14} />} title="数值化">
+      <Group icon={<FunnelIcon size={14} />} title="数值化">
         <Toggle
           label="智能数值化"
           hint="千分位、全角、货币符号、会计负数、科学计数法"
@@ -88,7 +88,7 @@ export function RulePanel({
         )}
       </Group>
 
-      <Group icon={<CalendarBlank size={14} />} title="日期">
+      <Group icon={<CalendarBlankIcon size={14} />} title="日期">
         <Toggle
           label="统一为 YYYY-MM-DD"
           hint="按内容识别，不按列名猜；非法日期保留原值"
@@ -102,7 +102,7 @@ export function RulePanel({
         )}
       </Group>
 
-      <Group icon={<TextAa size={14} />} title="全角转半角">
+      <Group icon={<TextAaIcon size={14} />} title="全角转半角">
         <Toggle
           label="全角字符转半角"
           hint="逐格作用于文本单元格，在去字符与数值化之前执行"
@@ -111,7 +111,7 @@ export function RulePanel({
         />
         {config.fullwidth && (
           <div className="mt-1 flex items-start gap-1.5 rounded-[var(--radius-chip)] border border-line bg-surface2 px-2 py-1.5">
-            <WarningCircle size={14} weight="fill" className="mt-[1px] shrink-0 text-warn" />
+            <WarningCircleIcon size={14} weight="fill" className="mt-[1px] shrink-0 text-warn" />
             <span className="hint text-warn">
               这会改写文本列：名称、备注里的全角字母与标点（ＨＫＣ／（）→ HKC/()）一并转半角。
               不想动的列在右侧点锁保护。全角代码转完仍是前导零，代码列照旧受标识符保护。
@@ -125,7 +125,7 @@ export function RulePanel({
         )}
       </Group>
 
-      <Group icon={<Tag size={14} />} title="去字符">
+      <Group icon={<TagIcon size={14} />} title="去字符">
         <Field
           label="要删除的字符"
           htmlFor="strip-tokens"
@@ -147,7 +147,7 @@ export function RulePanel({
         </Field>
         {clash.length > 0 && (
           <div className="mt-1 flex items-start gap-1.5 rounded-[var(--radius-chip)] border border-line bg-surface2 px-2 py-1.5">
-            <WarningCircle size={14} weight="fill" className="mt-[1px] shrink-0 text-warn" />
+            <WarningCircleIcon size={14} weight="fill" className="mt-[1px] shrink-0 text-warn" />
             <span className="hint text-warn">
               {clash.join('、')} 属于单位字符，已由单位换算处理，不会被当作去字符删掉。
             </span>
@@ -175,7 +175,7 @@ export function RulePanel({
         )}
       </Group>
 
-      <Group icon={<Scissors size={14} />} title="行裁剪">
+      <Group icon={<ScissorsIcon size={14} />} title="行裁剪">
         <div className="flex items-end gap-2">
           <Field label="删头部行数" className="flex-1">
             <NumberInput value={config.head_cut} onChange={(n) => onChange({ head_cut: n })} />
@@ -189,7 +189,7 @@ export function RulePanel({
         )}
       </Group>
 
-      <Group icon={<Trash size={14} />} title="删除空行空列">
+      <Group icon={<TrashIcon size={14} />} title="删除空行空列">
         <Toggle
           label="删除全空行"
           checked={config.drop_empty_rows}
@@ -202,7 +202,7 @@ export function RulePanel({
         />
       </Group>
 
-      <Group icon={<ShieldCheck size={14} />} title="逐列保护">
+      <Group icon={<ShieldCheckIcon size={14} />} title="逐列保护">
         {idColumns.length > 0 ? (
           <div className="hint">
             内核自动识别为标识符列：{idColumns.join('、')}。可在列检视里再手动保护任意列。

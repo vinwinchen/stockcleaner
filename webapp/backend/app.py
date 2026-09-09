@@ -18,6 +18,7 @@ import urllib.parse
 from collections import OrderedDict
 
 from fastapi import FastAPI, Request
+from starlette.datastructures import UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -418,7 +419,7 @@ async def upload(request: Request):
     这里把字节落到系统临时目录再交给同一套内核, 而不是在前端伪造路径。
     """
     form = await request.form()
-    files = [v for v in form.getlist('files') if hasattr(v, 'read')]
+    files = [v for v in form.getlist('files') if isinstance(v, UploadFile)]
     if not files:
         return JSONResponse({'error': '没有收到文件'}, status_code=400)
     stamp = time.strftime('%Y%m%d-%H%M%S')

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
-  CaretRight, CheckCircle, FolderOpen, ArrowsClockwise,
-  WarningCircle, XCircle, DownloadSimple,
+  CaretRightIcon, CheckCircleIcon, FolderOpenIcon, ArrowsClockwiseIcon,
+  WarningCircleIcon, XCircleIcon, DownloadSimpleIcon,
 } from '@phosphor-icons/react'
 import { Button, Chip, SectionHead, cn } from './ui'
 import { DASH, fmtInt } from '../lib/format'
@@ -173,7 +173,7 @@ function ReportBody({ report }: { report: Report }) {
 
       {report.warnings.map((w, i) => (
         <div key={i} className="flex items-start gap-1.5 text-[11.5px] text-warn">
-          <WarningCircle size={13} weight="fill" className="mt-[2px] shrink-0" />
+          <WarningCircleIcon size={13} weight="fill" className="mt-[2px] shrink-0" />
           <span>{w}</span>
         </div>
       ))}
@@ -232,7 +232,7 @@ export function RunReport({
         count={`${fmtInt(run.done)}/${fmtInt(run.total)} · ${pct}%`}
         right={
           <>
-            {run.failed > 0 && <Chip tone="err"><XCircle size={11} />{fmtInt(run.failed)} 失败</Chip>}
+            {run.failed > 0 && <Chip tone="err"><XCircleIcon size={11} />{fmtInt(run.failed)} 失败</Chip>}
             <Chip tone={run.status === 'running' ? 'accent' : 'neutral'}>
               {run.status === 'running' ? stageLabel(run.stage)
                 : run.status === 'cancelled' ? '已中止' : '完成'}
@@ -255,7 +255,7 @@ export function RunReport({
       <div className="min-h-0 flex-1 overflow-auto">
         {run.partial && (
           <div className="m-3 flex items-start gap-1.5 rounded-[var(--radius-chip)] border border-warn/40 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
-            <WarningCircle size={13} weight="fill" className="mt-[2px] shrink-0" />
+            <WarningCircleIcon size={13} weight="fill" className="mt-[2px] shrink-0" />
             <span>进度流断过一次，下面的清单只覆盖重放窗口内的部分；完整产出请以输出目录和登记为准。</span>
           </div>
         )}
@@ -273,10 +273,10 @@ export function RunReport({
                 onClick={() => setOpen(isOpen ? null : o.uid)}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface2"
               >
-                <CaretRight size={12} className={cn('shrink-0 text-faint transition-transform', isOpen && 'rotate-90')} />
+                <CaretRightIcon size={12} className={cn('shrink-0 text-faint transition-transform', isOpen && 'rotate-90')} />
                 {o.ok
-                  ? <CheckCircle size={14} weight="fill" className="shrink-0 text-ok" />
-                  : <XCircle size={14} weight="fill" className="shrink-0 text-err" />}
+                  ? <CheckCircleIcon size={14} weight="fill" className="shrink-0 text-ok" />
+                  : <XCircleIcon size={14} weight="fill" className="shrink-0 text-err" />}
                 <span className="truncate text-[12.5px] text-ink">{o.name}</span>
                 <span className="num ml-auto shrink-0 text-[11px] text-faint">
                   {o.ok ? `${fmtInt(o.rows_out)} x ${fmtInt(o.cols_out)}` : '失败'}
@@ -295,7 +295,7 @@ export function RunReport({
                             {p}
                           </span>
                           <Button size="sm" variant="ghost" onClick={() => onOpenDir(p)}>
-                            <FolderOpen size={13} /> 定位
+                            <FolderOpenIcon size={13} /> 定位
                           </Button>
                         </div>
                       ))}
@@ -310,10 +310,10 @@ export function RunReport({
 
       <div className="flex shrink-0 items-center gap-1.5 border-t border-line px-3 py-2">
         <Button size="sm" variant="ghost" onClick={onExport} disabled={!run.outcomes.length}>
-          <DownloadSimple size={13} /> 导出报告
+          <DownloadSimpleIcon size={13} /> 导出报告
         </Button>
         <Button size="sm" variant="ghost" onClick={onRetry} disabled={run.status === 'running'}>
-          <ArrowsClockwise size={13} /> 再跑一次
+          <ArrowsClockwiseIcon size={13} /> 再跑一次
         </Button>
         <span className="num ml-auto min-w-0 truncate text-[11px] text-faint" title={run.outputDir}>
           {run.outputDir}

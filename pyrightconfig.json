@@ -1,0 +1,8 @@
+{
+  // Point pyright at the project venv so cleaner_core.py / backend / run.py all see
+  // the same interpreter (pandas, fastapi, pywebview). venvPath is relative to this
+  // config (repo root) -> webapp/.venv. Portable across OS pyright resolves the
+  // platform python.exe automatically.
+  "venvPath": "webapp",
+  "venv": ".venv"
+}

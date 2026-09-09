@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useRef, useState, type ReactNode } from 'react'
 import * as SwitchPrimitive from '@radix-ui/react-switch'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { clsx, type ClassValue } from 'clsx'
-import { CircleNotch } from '@phosphor-icons/react'
+import { CircleNotchIcon } from '@phosphor-icons/react'
 
 export function cn(...inputs: ClassValue[]) {
   return clsx(inputs)
@@ -111,7 +111,7 @@ export function Button({
         className,
       )}
     >
-      {loading && <CircleNotch size={14} weight="bold" className="animate-spin" aria-hidden />}
+      {loading && <CircleNotchIcon size={14} weight="bold" className="animate-spin" aria-hidden />}
       {children}
     </button>
   )

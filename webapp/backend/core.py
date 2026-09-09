@@ -473,7 +473,7 @@ def is_scannable(path, explicit=False):
     return not low.endswith(BINARY_EXTS)
 
 
-def expand_inputs(files, folders, recursive=True, output_dir=None, skipped=None):
+def expand_inputs(files, folders, recursive=True, output_dir: str | None = None, skipped=None):
     """把显式文件 + 文件夹 glob 合并成去重、稳定排序的绝对路径列表。
 
     文件夹扫描按两类规则排除, 都不靠猜文件名:
@@ -493,7 +493,8 @@ def expand_inputs(files, folders, recursive=True, output_dir=None, skipped=None)
         skipped_map[_key_of(path)] = {'path': path, 'name': os.path.basename(path),
                                       'reason': reason}
 
-    out_abs = os.path.abspath(output_dir) if (output_dir or '').strip() else None
+    _out = (output_dir or '').strip()
+    out_abs = os.path.abspath(_out) if _out else None
     registered, _n_files = manifest.registered_outputs(folders or [], out_abs)
 
     for f in files or []:

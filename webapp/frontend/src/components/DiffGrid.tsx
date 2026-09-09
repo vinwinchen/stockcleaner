@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import {
   createColumnHelper, flexRender, getCoreRowModel, useReactTable, type ColumnDef,
 } from '@tanstack/react-table'
-import { ArrowsLeftRight, LockSimple } from '@phosphor-icons/react'
+import { ArrowsLeftRightIcon, LockSimpleIcon } from '@phosphor-icons/react'
 import { Chip, SectionHead, cn } from './ui'
 import { DASH, fmtInt } from '../lib/format'
 import type { CellVal, GridCell, PreviewResult } from '../types'
@@ -51,7 +51,7 @@ export function DiffGrid({
           <span className="flex items-center gap-1.5">
             <span className="truncate">{name}</span>
             {protectedColumns.includes(name) && (
-              <LockSimple size={11} weight="fill" className="shrink-0 text-accentsoft" aria-label="该列已保护" />
+              <LockSimpleIcon size={11} weight="fill" className="shrink-0 text-accentsoft" aria-label="该列已保护" />
             )}
           </span>
         ),
@@ -94,7 +94,7 @@ export function DiffGrid({
           grid ? (
             <>
               <Chip tone={changedCells ? 'accent' : 'neutral'}>
-                <ArrowsLeftRight size={11} /> 改动 {fmtInt(changedCells)} 格
+                <ArrowsLeftRightIcon size={11} /> 改动 {fmtInt(changedCells)} 格
               </Chip>
               {(grid.truncated_columns > 0 || grid.truncated_rows > 0) && (
                 <Chip title="超出预览上限的部分只在正式运行时处理">

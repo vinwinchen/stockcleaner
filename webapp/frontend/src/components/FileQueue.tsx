@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
-  FileXls, FileCsv, BracketsSquare, FolderOpen, TrayArrowDown, X, UploadSimple,
-  WarningCircle, MagnifyingGlass, ArrowRight,
+  FileXlsIcon, FileCsvIcon, BracketsSquareIcon, FolderOpenIcon, TrayArrowDownIcon, XIcon, UploadSimpleIcon,
+  WarningCircleIcon, MagnifyingGlassIcon, ArrowRightIcon,
 } from '@phosphor-icons/react'
 import { Button, Chip, IconButton, SectionHead, TextInput, cn } from './ui'
 import { DASH, extOf, fmtBytes, fmtInt } from '../lib/format'
@@ -10,9 +10,9 @@ import type { QueueItem } from '../types'
 function KindIcon({ name }: { name: string }) {
   const ext = extOf(name)
   if (ext === 'xlsx' || ext === 'xls' || ext === 'xlsm')
-    return <FileXls size={15} className="shrink-0 text-faint" />
-  if (ext === 'txt') return <BracketsSquare size={15} className="shrink-0 text-faint" />
-  return <FileCsv size={15} className="shrink-0 text-faint" />
+    return <FileXlsIcon size={15} className="shrink-0 text-faint" />
+  if (ext === 'txt') return <BracketsSquareIcon size={15} className="shrink-0 text-faint" />
+  return <FileCsvIcon size={15} className="shrink-0 text-faint" />
 }
 
 export function FileQueue({
@@ -79,14 +79,14 @@ export function FileQueue({
         right={
           <>
             <IconButton label="选择文件 (可多选)" onClick={onPickFiles} disabled={busy}>
-              <UploadSimple size={15} />
+              <UploadSimpleIcon size={15} />
             </IconButton>
             <IconButton label="递归扫描文件夹" onClick={onPickFolder} disabled={busy}>
-              <FolderOpen size={15} />
+              <FolderOpenIcon size={15} />
             </IconButton>
             {items.length > 0 && (
               <IconButton label="清空列表" onClick={onClear} disabled={busy}>
-                <X size={15} />
+                <XIcon size={15} />
               </IconButton>
             )}
           </>
@@ -97,7 +97,7 @@ export function FileQueue({
         <div className="flex flex-wrap gap-1 px-3 pb-2">
           {dirs.map((d) => (
             <Chip key={d} title={d}>
-              <FolderOpen size={11} />
+              <FolderOpenIcon size={11} />
               <span className="max-w-[180px] truncate">{d}</span>
             </Chip>
           ))}
@@ -111,7 +111,7 @@ export function FileQueue({
             dragOver ? 'border-accent bg-[var(--changed)]' : 'border-line2',
           )}
         >
-          <TrayArrowDown size={22} className="text-faint" />
+          <TrayArrowDownIcon size={22} className="text-faint" />
           <div className="text-[12.5px] text-muted">拖入 CSV / TXT / XLSX，或用上方的按钮选择</div>
           <div className="hint max-w-[30ch]">
             文件夹模式会递归扫描全部子目录；同名文件的输出名会自动加目录前缀，不会互相覆盖。
@@ -165,7 +165,7 @@ export function FileQueue({
                         )}
                         {item.error && (
                           <Chip tone="err" title={item.error}>
-                            <WarningCircle size={11} weight="fill" /> 读不了
+                            <WarningCircleIcon size={11} weight="fill" /> 读不了
                           </Chip>
                         )}
                       </div>
@@ -190,7 +190,7 @@ export function FileQueue({
                         }}
                         className="rounded-[4px] p-0.5 text-faint opacity-0 transition group-hover:opacity-100 hover:text-ink disabled:hidden"
                       >
-                        <X size={13} />
+                        <XIcon size={13} />
                       </button>
                     </td>
                   </tr>
@@ -200,13 +200,13 @@ export function FileQueue({
           </table>
           {failed > 0 && (
             <div className="mx-2 mt-2 flex items-center gap-1.5 text-[11.5px] text-err">
-              <WarningCircle size={13} weight="fill" />
+              <WarningCircleIcon size={13} weight="fill" />
               {failed} 个文件读不了，运行时会跳过并记入报告
             </div>
           )}
           {items.length > 0 && (
             <div className="mx-2 mt-2 flex items-center gap-1.5 text-[11px] text-faint">
-              <MagnifyingGlass size={12} />
+              <MagnifyingGlassIcon size={12} />
               选中一个文件即可在右侧核对每一列的改动
             </div>
           )}
@@ -229,7 +229,7 @@ export function FileQueue({
           className="h-[28px] text-[11.5px]"
         />
         <Button size="sm" onClick={submitPaste} disabled={!pasteValue.trim()} title="加入列表">
-          <ArrowRight size={13} />
+          <ArrowRightIcon size={13} />
         </Button>
       </div>
     </div>

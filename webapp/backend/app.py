@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from . import core
 from .jobs import registry
 
-APP_VERSION = '2.2.2'
+APP_VERSION = '2.2.3'
 # 单次拖拽上传的总量上限。没有上限时, 一次拖进来的东西可以无限写满系统临时目录
 # (落盘发生在任何一个字节被解析之前), 而本机进程面本来就无鉴权。
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3

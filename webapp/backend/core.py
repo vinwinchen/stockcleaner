@@ -25,9 +25,7 @@ from cleaner_core import (read_table, clean_table, process_file, cell_repr,
                           SUPPORTED_EXTS, EXCEL_EXTS, BINARY_EXTS)
 from .manifest import MANIFEST_NAME
 
-# 扩展名清单来自内核 (以前这里抄了一份, 结果 .xlsm 能读、能出 xlsx, 却扫不到);
-# 保留旧名字是为了不改动本模块其余引用点。
-SUPPORTED_EXT = SUPPORTED_EXTS
+# 扩展名清单来自内核 (以前这里抄了一份, 结果 .xlsm 能读、能出 xlsx, 却扫不到)。
 DEFAULT_SAMPLE_ROWS = 500
 MAX_PREVIEW_SAMPLES = 12          # 每列展示几组 原值 -> 结果
 DEFAULT_CONFIG = {
@@ -446,7 +444,7 @@ def _inside(child, parent):
 def is_scannable(path, explicit=False):
     """这个路径能不能进待处理清单。
 
-    不只是 `endswith(SUPPORTED_EXT)`: 那会让内核的"按文本猜读"永远够不着 ——
+    不只是 `endswith(SUPPORTED_EXTS)`: 那会让内核的"按文本猜读"永远够不着 ——
     用户在资源管理器里看到的 `导出.dat` / 无后缀文件会被静默判成"不支持的类型",
     而内核其实能读并会给出猜读警告。所以规则是: 认识的表格后缀进, 明确二进制的
     (.doc/.pdf/.png/...) 不进 (那是真读不了, 放进去只是给队列添一堆红色报错),
@@ -468,7 +466,7 @@ def is_scannable(path, explicit=False):
         base = parts[-1] if parts else low
         if base == MANIFEST_NAME or base.endswith('.tmp'):
             return False                   # 自己的登记文件 / 原子写残留
-    if low.endswith(SUPPORTED_EXT):
+    if low.endswith(SUPPORTED_EXTS):
         return True
     return not low.endswith(BINARY_EXTS)
 

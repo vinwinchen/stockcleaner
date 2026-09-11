@@ -3,22 +3,8 @@ name = "stockcleaner-webapp"
 version = "2.2.3"
 description = "StockCleaner 的 Web 前端 + 本地服务层 (清洗内核复用 ../cleaner_core.py)"
 requires-python = ">=3.11"
-dependencies = [
-    # 上限 <4 不是随手写的: 内核的"读取阶段零破坏"压在三条 pandas 行为上 ——
-    # dtype=object 不做类型推断 (前导零)、keep_default_na=False 不吃 N/A/NULL 文本、
-    # read_csv 对重复表头的去重口径。这些在 2.x -> 3.0 之间真的变过 (默认字符串 dtype
-    # 与 copy-on-write), 实测跑在 3.0.5。
-    "pandas>=2.2,<4",
-    "openpyxl>=3.1",
-    "xlrd>=2.0",
-    # Excel 读取加速; 缺失时内核自动退回 openpyxl (见 cleaner_core._read_excel)
-    "python-calamine>=0.2",
-    "fastapi>=0.115",
-    "uvicorn>=0.30",
-    "python-multipart>=0.0.9",
-    "pywebview>=5.1",
-    "pyinstaller>=6.6",
-]
+# 依赖清单唯一真值: requirements.txt。这里不再抄一份 —— 再抄迟早漂移,
+# pyinstaller 就是这么混进运行时依赖的。
 
 [tool.uv]
 package = false

@@ -36,7 +36,7 @@ export const EMPTY_RUN: RunSummary = {
 }
 
 /** 内核阶段标识 -> 界面文案 */
-export const STAGE_LABEL: Record<string, string> = {
+const STAGE_LABEL: Record<string, string> = {
   read: '读取中', prepare: '预处理', fullwidth: '全角转半角', strip: '去字符',
   numericize: '数值化', dates: '日期统一', protect: '列保护回退',
   write: '写盘中', save: '收尾',

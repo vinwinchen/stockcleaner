@@ -210,7 +210,7 @@ stockcleaner/
     │   ├── jobs.py          批量任务线程 + 可重放的 SSE 事件缓冲
     │   ├── manifest.py      产出登记: 精确排除自己的输出, 不靠猜文件名
     │   └── app.py           路由 / 静态托管 / 原生对话框桥接
-    ├── frontend/            React 18 + Vite + Tailwind v4 + Radix + TanStack Table
+    ├── frontend/            React 18 + Vite + Tailwind v4 + Radix
     ├── samples/             演示与自测数据
     ├── make_fullsample.py   生成"全功能验证"对抗样例 (601 行)
     ├── verify_fullsample.py 全功能样例逐项实测 (对着运行中的服务)

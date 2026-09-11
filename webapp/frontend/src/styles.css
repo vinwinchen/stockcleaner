@@ -4,8 +4,8 @@
    StockCleaner 设计令牌
    冷中性 (zinc 一族) + 单一强调色。红/绿只用于状态图标,
    绝不用于数据数值着色: A 股语境红涨绿跌, 在本工具里会误读。
-   中文字体走系统 (PingFang SC / Microsoft YaHei), 拉丁字与数字
-   走自托管 Geist; 不自托管中文 webfont (几 MB, 桌面壳首帧不值)。
+   字体全走系统栈: 拉丁字交给 -apple-system / Segoe UI, 中文 PingFang SC /
+   Microsoft YaHei。不自托管 webfont (Geist 装了从未接线, 已删; CJK webfont 几 MB 更不值)。
 
    主题解析顺序 (关键): :root 先给亮色, 再由 prefers-color-scheme
    在"用户还没手动选过"时切到暗色, 最后 [data-theme] 是显式覆盖。
@@ -113,9 +113,9 @@
 }
 
 @theme inline {
-  --font-sans: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, 'Cascadia Mono', 'JetBrains Mono', 'Menlo',
+  --font-mono: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', 'Menlo',
     'Microsoft YaHei', monospace;
 
   --color-bg: var(--bg);

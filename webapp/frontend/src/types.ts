@@ -70,7 +70,6 @@ export type PreviewResult = {
   cached?: boolean
 }
 
-export type PreviewError = { ok: false; error: string }
 
 export type FilePlan = {
   path: string

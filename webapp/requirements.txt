@@ -17,3 +17,5 @@ fastapi>=0.115
 uvicorn>=0.30
 python-multipart>=0.0.9
 pywebview>=5.1
+
+# 打包 exe 另需 PyInstaller (构建工具, 不进运行时依赖): pip install "pyinstaller>=6.6"

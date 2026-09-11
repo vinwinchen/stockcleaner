@@ -1,21 +1,16 @@
 import { useEffect, useMemo, useRef } from 'react'
-import {
-  createColumnHelper, flexRender, getCoreRowModel, useReactTable, type ColumnDef,
-} from '@tanstack/react-table'
 import { ArrowsLeftRightIcon, LockSimpleIcon } from '@phosphor-icons/react'
 import { Chip, SectionHead, cn } from './ui'
 import { DASH, fmtInt } from '../lib/format'
 import type { CellVal, GridCell, PreviewResult } from '../types'
 
-type Row = { __row: number; __cells: GridCell[] }
-
-const helper = createColumnHelper<Row>()
+const EMPTY_CELL: GridCell = [{ s: '', t: 'empty' }, { s: '', t: 'empty' }, false]
 
 /** 只读差异矩阵: 数据量固定为「前 60 行 x 前 24 列」(与服务层 build_grid 的
- *  max_rows=60 同源), 不需要排序/分页, 用 TanStack 只为拿到稳定的列模型与
- *  可复用的列宽/顺序管理。
+ *  max_rows=60 同源)。不排序、不分页、不交互改列宽 —— 一张静态表格,
+ *  列宽按内容算一次。
  *
- *  格子按**下标**存在 __cells 里, 不按列名存成 row[列名]: 表头是 `__proto__`、
+ *  格子按**下标**存在 cells 里, 不按列名存成 row[列名]: 表头是 `__proto__`、
  *  `constructor` 这类名字时, 按名存会写进原型链而不是这一行。
  */
 export function DiffGrid({
@@ -30,42 +25,16 @@ export function DiffGrid({
   const grid = preview?.grid
   const scroller = useRef<HTMLDivElement>(null)
 
-  const data = useMemo<Row[]>(() => (grid?.rows ?? []).map((r) => ({
-    __row: r.row,
-    __cells: grid!.columns.map((_c, i) => r.cells[i] ?? [{ s: '', t: 'empty' }, { s: '', t: 'empty' }, false]),
-  })), [grid])
-
-  const columns = useMemo<ColumnDef<Row>[]>(() => {
+  const cols = useMemo(() => {
     if (!grid) return []
-    const widthOf = (idx: number) => {
+    return grid.columns.map((name, i) => {
       const longest = (grid.rows ?? []).reduce((max, r) => {
-        const cell = r.cells[idx]
+        const cell = r.cells[i]
         return Math.max(max, cell ? Math.max(cell[0].s.length, cell[1].s.length) : 0)
-      }, (grid.columns[idx] ?? '').length)
-      return Math.min(260, Math.max(96, longest * 7.4 + 26))
-    }
-    return grid.columns.map((name, i) =>
-      helper.accessor((row) => row.__cells[i], {
-        id: `${i}:${name}`,
-        header: () => (
-          <span className="flex items-center gap-1.5">
-            <span className="truncate">{name}</span>
-            {protectedColumns.includes(name) && (
-              <LockSimpleIcon size={11} weight="fill" className="shrink-0 text-accentsoft" aria-label="该列已保护" />
-            )}
-          </span>
-        ),
-        size: widthOf(i),
-        minSize: 88,
-        cell: ({ getValue }) => {
-          const [before, after, changed] = getValue() as GridCell
-          return <DiffCell before={before} after={after} changed={changed} />
-        },
-      }) as ColumnDef<Row>,
-    )
-  }, [grid, protectedColumns])
-
-  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+      }, (grid.columns[i] ?? '').length)
+      return { name, width: Math.min(260, Math.max(96, longest * 7.4 + 26)) }
+    })
+  }, [grid])
 
   // 键盘横向滚动: 表格在 pywebview 里可能拿到焦点, Shift+滚轮是主要手段
   useEffect(() => {
@@ -105,38 +74,44 @@ export function DiffGrid({
           ) : undefined
         }
       />
-      {!grid || data.length === 0 ? (
+      {!grid || grid.rows.length === 0 ? (
         <div className="px-4 py-6 text-[12.5px] text-faint">选择左侧文件后显示逐格差异。</div>
       ) : (
         <div ref={scroller} className="min-h-0 flex-1 overflow-auto">
           <table className="w-max border-separate border-spacing-0 text-[11.5px]">
             <thead className="sticky top-0 z-20">
-              {table.getHeaderGroups().map((hg) => (
-                <tr key={hg.id}>
-                  {hg.headers.map((header) => (
-                    <th
-                      key={header.id}
-                      style={{ width: header.getSize() }}
-                      className="sticky top-0 z-20 truncate border-b border-line bg-surface2 px-2 py-1.5 text-left text-[11px] font-medium text-muted"
-                    >
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                    </th>
-                  ))}
-                </tr>
-              ))}
+              <tr>
+                {cols.map((c, i) => (
+                  <th
+                    key={i}
+                    style={{ width: c.width }}
+                    className="sticky top-0 z-20 truncate border-b border-line bg-surface2 px-2 py-1.5 text-left text-[11px] font-medium text-muted"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate">{c.name}</span>
+                      {protectedColumns.includes(c.name) && (
+                        <LockSimpleIcon size={11} weight="fill" className="shrink-0 text-accentsoft" aria-label="该列已保护" />
+                      )}
+                    </span>
+                  </th>
+                ))}
+              </tr>
             </thead>
             <tbody>
-              {table.getRowModel().rows.map((row) => (
-                <tr key={row.id} className="group">
-                  {row.getVisibleCells().map((cell) => (
-                    <td
-                      key={cell.id}
-                      style={{ width: cell.column.getSize() }}
-                      className="max-w-[260px] border-b border-line/60 px-0 py-0 align-top transition-colors group-hover:bg-surface2"
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
+              {grid.rows.map((row, rowIdx) => (
+                <tr key={rowIdx} className="group">
+                  {cols.map((_c, i) => {
+                    const [before, after, changed] = row.cells[i] ?? EMPTY_CELL
+                    return (
+                      <td
+                        key={`${rowIdx}:${i}`}
+                        style={{ width: _c.width }}
+                        className="max-w-[260px] border-b border-line/60 px-0 py-0 align-top transition-colors group-hover:bg-surface2"
+                      >
+                        <DiffCell before={before} after={after} changed={changed} />
+                      </td>
+                    )
+                  })}
                 </tr>
               ))}
             </tbody>

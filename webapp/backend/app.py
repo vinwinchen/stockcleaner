@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from . import core
 from .jobs import registry
 
-APP_VERSION = '2.2.4'
+APP_VERSION = '2.2.5'
 # 单次拖拽上传的总量上限。没有上限时, 一次拖进来的东西可以无限写满系统临时目录
 # (落盘发生在任何一个字节被解析之前), 而本机进程面本来就无鉴权。
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
@@ -265,6 +265,17 @@ async def fs_list(request: Request):
     data = await _body(request)
     include_files = bool(data.get('include_files'))
     return await asyncio.to_thread(core.list_dir, data.get('path'), include_files)
+
+
+@app.post('/api/classify')
+async def classify(request: Request):
+    """粘贴进来的路径按文件系统分类: 是文件 / 是目录 / 不存在。
+
+    分类必须在服务端做 —— 前端只有字符串, 按后缀猜会把 `.dat`、无后缀的表格
+    当成目录 (内核本来能读它们), 与扫描文件夹那条路的口径分叉。
+    """
+    data = await _body(request)
+    return await asyncio.to_thread(core.classify_paths, _str_list(data.get('paths')))
 
 
 @app.post('/api/dialog')

@@ -12,6 +12,7 @@ __pycache__/
 # PyInstaller 产物 (源码仓库不带二进制; 发布走 GitHub Release)
 webapp/build/
 webapp/dist/
+webapp/StockCleaner-*.zip
 
 # 运行/编辑器残留
 *.tmp

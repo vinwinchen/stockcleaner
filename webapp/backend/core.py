@@ -22,7 +22,7 @@ from datetime import datetime
 import pandas as pd
 
 from cleaner_core import (read_table, clean_table, process_file, cell_repr,
-                          SUPPORTED_EXTS, EXCEL_EXTS, BINARY_EXTS)
+                          sniff_container, SUPPORTED_EXTS, EXCEL_EXTS, BINARY_EXTS)
 from .manifest import MANIFEST_NAME
 
 # 扩展名清单来自内核 (以前这里抄了一份, 结果 .xlsm 能读、能出 xlsx, 却扫不到)。
@@ -158,8 +158,16 @@ def json_safe(v, max_len=160):
 
 
 def _output_targets(path, fmt='keep'):
-    """按输出格式算出实际会写出的扩展名序列 (第一个是主输出)。"""
-    is_excel_src = str(path).lower().endswith(EXCEL_EXTS)
+    """按输出格式算出实际会写出的扩展名序列 (第一个是主输出)。
+
+    keep 跟随源文件的**真实承载格式** (文件头判定), 不是后缀: CSV 改名的 .xlsx
+    会写出 .csv。这条必须与内核 save_table 的口径一致, 否则队列里预告的名字
+    和实际产出对不上, 同名防覆盖也会算错组。
+    """
+    container = sniff_container(path)
+    if container is None:                        # 读不了头: 退回后缀口径
+        container = 'excel' if str(path).lower().endswith(EXCEL_EXTS) else 'text'
+    is_excel_src = container == 'excel'
     if fmt == 'both':
         return ['xlsx', 'csv']
     if fmt in ('xlsx', 'csv'):
@@ -361,8 +369,7 @@ def preview_file(path, raw_config):
         rows.append({'index': int(idx) if isinstance(idx, (int, float)) else str(idx),
                      'cells': [json_safe(cleaned.at[idx, by_name[c]]) for c in preview_cols]})
 
-    encoding = meta.get('encoding') or ('excel' if str(path).lower().endswith(
-        EXCEL_EXTS) else 'auto')
+    encoding = meta.get('encoding') or ('excel' if meta.get('container') == 'excel' else 'auto')
     return {
         'ok': True,
         'path': os.path.abspath(path),
@@ -528,6 +535,37 @@ def expand_inputs(files, folders, recursive=True, output_dir: str | None = None,
     for p in found:
         uniq.setdefault(_key_of(p), p)
     return sorted(uniq.values(), key=lambda p: p.lower())
+
+
+def classify_paths(paths):
+    """把"可能是文件也可能是目录"的路径按**文件系统**分成 files/dirs/missing。
+
+    粘贴路径的分类必须与内核读法同源: 内核认不认一个文件看的是内容与
+    is_scannable, 从不看后缀白名单 —— 前端拿正则猜 `\\.(csv|tsv|...)$` 时,
+    `.dat` / 无后缀的表格会被当成目录静默丢掉 (内核明明能读, 还不会给任何提示)。
+    前端拿不到文件系统, 所以这一步只能在后端做。
+
+    空串先剔掉: `os.path.abspath('')` 是当前目录, 一条空路径会变成"扫描整个 cwd"。
+    返回绝对路径并按 normcase 去重 (Windows 上 c:\\a 与 C:\\a 是同一个)。
+    """
+    out = {'files': [], 'dirs': [], 'missing': []}
+    seen = set()
+    for raw in paths or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        ap = os.path.abspath(text)
+        key = _key_of(ap)
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isdir(ap):
+            out['dirs'].append(ap)
+        elif os.path.isfile(ap):
+            out['files'].append(ap)
+        else:
+            out['missing'].append(ap)
+    return out
 
 
 def _key_of(path):

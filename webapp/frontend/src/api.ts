@@ -65,6 +65,10 @@ export const api = {
   inspect: (paths: string[]) =>
     post<{ items: BatchItem[]; truncated: boolean; config_applied?: boolean }>('/api/inspect', { paths }),
 
+  /** 粘贴路径的分类。前端拿不到文件系统, 按后缀猜会与内核读法分叉 (见 backend/core) */
+  classify: (paths: string[]) =>
+    post<{ files: string[]; dirs: string[]; missing: string[] }>('/api/classify', { paths }),
+
   preview: (path: string, config: Config) =>
     post<PreviewResult>('/api/preview', { path, config }),
 

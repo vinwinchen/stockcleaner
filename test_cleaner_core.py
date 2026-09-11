@@ -7,7 +7,8 @@ import sys
 import tempfile
 
 from cleaner_core import (parse_numeric, numericize_dataframe, normalize_dates,
-                          read_table, clean_table, process_file, strip_tokens_pass)
+                          read_table, clean_table, process_file, strip_tokens_pass,
+                          sniff_container)
 
 import pandas as pd
 
@@ -769,6 +770,90 @@ def test_utf16_bom_read_and_binary_reject():
     print('[ok] 带 BOM 的 UTF-16 可读; 无 BOM/伪 BOM/截断仍按二进制拒读')
 
 
+def test_container_overrides_extension():
+    """对抗性回归: 后缀与内容打架时按文件头判定, 输出也跟着真实格式走。
+
+    券商软件导出的 `.xlsx` 其实是 CSV 很常见; 旧实现只看后缀, 于是走 Excel 引擎
+    报"所有 Excel 引擎均无法读取该文件", 用户只能先去改文件名, 输出侧还会写出一个
+    扩展名撒谎的 .xlsx。现在读取与输出两处都按真实格式, 且**不做**"引擎读失败再退回
+    文本"的二次猜测: 改名的 .docx 也是 ZIP, 退回文本会洗出一整表乱码还照样落盘。
+    """
+    import zipfile
+
+    tmp = tempfile.mkdtemp()
+    base = {'head_cut': 0, 'tail_cut': 0, 'drop_empty_rows': False, 'drop_empty_cols': False,
+            'strip_tokens': [], 'numericize': False, 'convert_units': False,
+            'normalize_dates': False}
+
+    # 判据本身: ZIP/OLE 是 Excel 容器, 文本头不是, 空文件判不出来
+    for name, head, want in [('z', b'PK\x03\x04', 'excel'),
+                             ('o', b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1', 'excel'),
+                             ('t', '代码,金额\n'.encode('utf-8'), 'text'),
+                             ('e', b'', None)]:
+        p = os.path.join(tmp, f'{name}.bin')
+        with open(p, 'wb') as fh:
+            fh.write(head)
+        assert sniff_container(p) == want, (name, sniff_container(p))
+
+    # 1) 真身是 CSV, 后缀撒谎 .xlsx
+    fake_xlsx = os.path.join(tmp, '成交.xlsx')
+    with open(fake_xlsx, 'w', encoding='utf-8', newline='') as fh:
+        fh.write('代码,金额\n000001,"1,234"\n')
+    df, meta = read_table(fake_xlsx)
+    assert meta['container'] == 'text' and 'engine' not in meta, meta
+    assert list(df.columns) == ['代码', '金额'], df.columns.tolist()
+    assert df['代码'].tolist() == ['000001']                  # 前导零照样保住
+    assert any('不是 Excel 容器' in w for w in meta['warnings']), meta['warnings']
+    _, out1 = process_file(fake_xlsx, tmp, dict(base, output_format='keep'))
+    assert out1.endswith('成交_cleaned.csv'), out1            # 输出跟随真实格式
+    with open(out1, encoding='utf-8-sig') as fh:
+        assert fh.readline().strip() == '代码,金额'            # 真的是 csv, 不是改名的 xlsx
+    _, out1b = process_file(fake_xlsx, tmp, dict(base, output_format='xlsx'))
+    assert out1b.endswith('成交_cleaned.xlsx'), out1b         # 显式指定仍照做
+
+    # 2) 真身是 TSV, 后缀撒谎 .xls -> 走文本通道, 仍写 csv
+    fake_xls = os.path.join(tmp, '持仓.xls')
+    with open(fake_xls, 'w', encoding='gbk', newline='') as fh:
+        fh.write('代码\t金额\n000001\t1,234\n')
+    _df2, meta2 = read_table(fake_xls)
+    assert meta2['container'] == 'text' and meta2['delimiter'] == "'\\t'", meta2
+    _, out2 = process_file(fake_xls, tmp, dict(base, output_format='keep'))
+    assert out2.endswith('持仓_cleaned.csv'), out2
+
+    # 3) 反过来: 真身是 xlsx, 后缀撒谎 .csv
+    src = os.path.join(tmp, '真.xlsx')
+    pd.DataFrame({'a': ['000001'], 'b': ['1,234']}).to_excel(src, index=False)
+    fake_csv = os.path.join(tmp, '报价.csv')
+    with open(src, 'rb') as r, open(fake_csv, 'wb') as w:
+        w.write(r.read())
+    df3, meta3 = read_table(fake_csv)
+    assert meta3['container'] == 'excel' and meta3.get('engine'), meta3
+    assert df3['a'].tolist() == ['000001'], df3.to_dict()
+    _, out3 = process_file(fake_csv, tmp, dict(base, output_format='keep'))
+    assert out3.endswith('报价_cleaned.xlsx'), out3
+
+    # 4) ZIP 但不是工作簿 (改名的 .docx 之类) 必须报错, 不许退回文本洗出乱码表
+    zip_not_book = os.path.join(tmp, '文档.dat')
+    with zipfile.ZipFile(zip_not_book, 'w') as z:
+        z.writestr('word/document.xml', '正文' * 50)
+    try:
+        read_table(zip_not_book)
+        assert False, 'ZIP 容器读不出工作簿时应报错, 不得退回文本'
+    except ValueError:
+        pass
+
+    # 5) 后缀撒谎也不能绕过二进制名单 (.docx 仍是拒读, 不是"读不了")
+    doc = os.path.join(tmp, 'x.docx')
+    with open(doc, 'wb') as fh:
+        fh.write(b'PK\x03\x04' + b'\x00' * 32)
+    try:
+        read_table(doc)
+        assert False, '.docx 应被后缀名单拒读'
+    except ValueError as exc:
+        assert '不支持的文件类型' in str(exc), exc
+    print('[ok] 文件头优先于后缀 (两个方向), 输出跟随真实格式, 不猜坏容器')
+
+
 def test_progress_callback_monotonic():
     """阶段进度回调: frac 单调不减、process_file 收于 1.0; 不传回调行为零变化。
 
@@ -840,5 +925,6 @@ if __name__ == '__main__':
     test_protected_columns_never_enter_wash_channels()
     test_huge_decimal_with_fraction_keeps_original()
     test_utf16_bom_read_and_binary_reject()
+    test_container_overrides_extension()
     test_progress_callback_monotonic()
     print('\n全部测试通过 ✔')

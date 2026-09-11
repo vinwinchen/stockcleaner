@@ -339,6 +339,43 @@ def test_extension_policy_is_same_on_both_sides():
     print('[ok] 后缀准入 = 内核读法 (猜读留警告, 二进制拒收)')
 
 
+def test_paste_classification_uses_filesystem_not_suffix():
+    """粘贴路径的分类判据必须是文件系统, 不是后缀白名单 —— 与内核读法同一口径。
+
+    曾经前端按 `/\\.(csv|tsv|txt|xlsx|xls|xlsm)$/` 分类: 内核对未知后缀是"按文本猜读",
+    前端却把 `导出.dat` / 无后缀的表格当目录交给后端, 于是内核明明能读的文件
+    在队列里永远不出现, 而且一句提示都没有。这里钉住三个桶的判据与去重口径。
+    """
+    base = tempfile.mkdtemp(prefix='sc-classify-')
+    dat = os.path.join(base, '导出.dat')                  # 内核认它 (猜读 + 警告), 不该被当目录
+    noext = os.path.join(base, '无后缀表格')
+    sub = os.path.join(base, '子目录')
+    for p in (dat, noext):
+        with open(p, 'w', encoding='utf-8', newline='') as f:
+            f.write('代码,金额\n000001,1\n')
+    os.makedirs(sub)
+    ghost = os.path.join(base, '没有这个.csv')
+
+    got = core.classify_paths([dat, noext, sub, ghost, '', '  ', dat, sub])
+    assert got['files'] == [dat, noext], got                       # 后缀不在白名单里也照样是文件
+    assert got['dirs'] == [sub], got
+    assert got['missing'] == [ghost], got
+    # 空串绝不能变成"当前目录"被当成输入 (abspath('') 就是 cwd)
+    assert not any(os.path.isdir(p) for p in got['files']), got
+
+    # 分类结果直接决定队列: .dat 走显式文件 -> expand_inputs 收下 (内核读得了)
+    picked = core.expand_inputs(got['files'], got['dirs'], True)
+    assert picked == sorted([dat, noext], key=lambda p: p.lower()), picked
+    # 反过来, 后缀名单里的真二进制点选后仍不进队列 (is_scannable 会拒)
+    doc = os.path.join(base, '真二进制.doc')
+    with open(doc, 'w', encoding='utf-8', newline='') as f:
+        f.write('not a table\n')
+    got2 = core.classify_paths([doc])
+    assert got2['files'] == [doc], got2                            # 是文件
+    assert core.expand_inputs(got2['files'], [], True) == []        # 但读不了, 不入队
+    print('[ok] 粘贴分类 = 文件系统判据 (.dat/无后缀照收, 找不到的显式回报)')
+
+
 def _asgi_post_get(app, scope, body=b''):
     """把请求体一次性喂给 ASGI app, 返回 (status, 响应字节)。
 
@@ -462,6 +499,7 @@ if __name__ == '__main__':
                test_normalize_config_survives_junk,
                test_removed_new_columns_reported,
                test_extension_policy_is_same_on_both_sides,
+               test_paste_classification_uses_filesystem_not_suffix,
                test_local_only_guard_blocks_foreign_host_and_origin,
                test_upload_sanitize_and_unique_names):
         fn()

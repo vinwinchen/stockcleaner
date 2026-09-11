@@ -240,12 +240,17 @@ export default function App() {
   }
 
   const addPaths = async (paths: string[]) => {
-    // 粘贴进来的路径要自己分类: 同时塞进 files 和 dirs 会让后端把目录名报成"不支持的类型"
-    const isFile = (p: string) => /\.(csv|tsv|txt|xlsx|xls|xlsm)$/i.test(p.trim())
-    await addSources({
-      files: paths.filter(isFile),
-      dirs: paths.filter((p) => !isFile(p)),
-    })
+    // 文件/目录的分辨交给服务端: 前端只看后缀, 会把 .dat、无后缀的表格当成目录
+    // 静默丢掉, 而内核本来就能读它们 —— 与"扫描文件夹"那条路的口径就分叉了。
+    try {
+      const { files, dirs, missing } = await api.classify(paths)
+      if (missing.length) {
+        setNotice(`已忽略 ${missing.length} 个找不到的路径: ${missing.slice(0, 3).join('、')}`)
+      }
+      if (files.length || dirs.length) await addSources({ files, dirs })
+    } catch (e) {
+      setNotice(msg(e))
+    }
   }
 
   const removeOne = async (path: string) => {

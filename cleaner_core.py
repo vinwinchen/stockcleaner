@@ -35,6 +35,7 @@ import pandas as pd
 __all__ = [
     'parse_numeric', 'read_table', 'save_table', 'clean_table',
     'process_file', 'format_report', 'normalize_fullwidth', 'cell_repr',
+    'sniff_container',
 ]
 
 # ==========================================
@@ -551,6 +552,37 @@ def _sniff_delimiter(text, default=','):
     return best or default
 
 
+# 真 Excel 只有两种容器: xlsx/xlsm 是 ZIP, xls 是 OLE2 复合文档。文件头比后缀可靠 ——
+# 券商/银行导出常把 CSV 存成 .xlsx, 反过来也有把 xlsx 改名成 .csv 的; 只看后缀
+# 会让前者"所有引擎都读不了"、后者"内容是二进制", 逼用户先去改文件名。
+_ZIP_MAGIC = (b'PK\x03\x04', b'PK\x05\x06', b'PK\x07\x08')
+_OLE_MAGIC = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+
+
+def _read_head(path, size=8):
+    try:
+        with open(path, 'rb') as f:
+            return f.read(size)
+    except OSError:
+        return b''
+
+
+def sniff_container(path):
+    """按文件头判定真实承载格式: 'excel' (ZIP/OLE 容器) / 'text' / None (空文件或读不了头)。
+
+    这是"读法"的唯一判据, 后缀只在对 None 兜底时才用。两个方向都覆盖:
+    CSV 改名成的 .xlsx 落 text 通道, xlsx 改名成的 .csv 落 excel 通道。
+
+    只认文件头, 不做"引擎读失败再退回文本"的二次猜测: 改名的 .docx 也是 ZIP,
+    退回文本就会把压缩流按 latin-1 解出一整表乱码还照样落盘 —— 那正是本工具
+    最不能做的事。容器坏了就该报错, 不该猜。
+    """
+    head = _read_head(path)
+    if head[:4] in _ZIP_MAGIC or head.startswith(_OLE_MAGIC):
+        return 'excel'
+    return 'text' if head else None
+
+
 def _read_excel(path):
     """Excel 读取。引擎按"快且保真"排序, 失败逐个回退, 最后才报错。
 
@@ -567,8 +599,8 @@ def _read_excel(path):
     环境变量 SC_EXCEL_ENGINE 可钉死引擎 (openpyxl / xlrd / calamine):
     既是"新引擎读某类怪文件出问题"时的兜底开关, 也是做 A/B 计时时的对照组。
     """
-    ext = os.path.splitext(path)[1].lower()
-    primary = 'xlrd' if ext == '.xls' else 'openpyxl'
+    # 首引擎按容器选, 不按后缀: 改名过的文件后缀是错的, 用错引擎会白跑一轮
+    primary = 'xlrd' if _read_head(path).startswith(_OLE_MAGIC) else 'openpyxl'
     forced = (os.environ.get('SC_EXCEL_ENGINE') or '').strip().lower()
     order = (forced,) if forced else ('calamine', primary, None, 'openpyxl', 'xlrd')
     last_error = None
@@ -731,23 +763,36 @@ BINARY_EXTS = ('.doc', '.docx', '.ppt', '.pptx', '.zip', '.rar', '.7z', '.pdf', 
 def read_table(path):
     """读入表格, 返回 (df, meta)。文本文件按文本保真读入, 不做类型推断。
 
-    扩展名只用来选"读法", 不用来判生死: 券商/银行导出里 content 是逗号分隔、
+    后缀只用来选"读法", 不用来判生死: 券商/银行导出里 content 是逗号分隔、
     后缀却是 .dat/.log/无后缀的情况很常见, 一律拒读等于让用户先去改文件名。
     所以: Excel 后缀走 Excel, 文本后缀走文本, 二进制后缀拒读,
     其余后缀按文本猜一次并留下警告 (猜错的代价是一条提示, 不是静默乱码)。
+
+    后缀和内容打架时**以内容为准** (见 sniff_container): CSV 改名的 .xlsx 与
+    xlsx 改名的 .csv 都按真实格式读, 并在 meta['warnings'] 里说明;
+    meta['container'] 是真实格式, 写盘时也按它走 —— 假 .xlsx 的真身是文本,
+    输出就写 .csv, 不让用户拿回一个扩展名撒谎的文件。
     """
     ext = os.path.splitext(path)[1].lower()
-    if ext in EXCEL_EXTS:
-        df, engine = _read_excel(path)
-        return df, {'warnings': [], 'engine': engine}
-    if ext in TEXT_EXTS:
-        return _read_delimited(path, ext)
     if ext in BINARY_EXTS:
         raise ValueError(f"不支持的文件类型: {ext} (支持 {' '.join(SUPPORTED_EXTS)})")
+    container = sniff_container(path)
+    if container is None:                       # 空文件/读不了头: 退回后缀口径
+        container = 'excel' if ext in EXCEL_EXTS else 'text'
+    if container == 'excel':
+        df, engine = _read_excel(path)
+        return df, {'warnings': [], 'engine': engine, 'container': 'excel'}
     df, meta = _read_delimited(path, ext)
-    meta['warnings'] = list(meta.get('warnings') or []) + [
-        f'扩展名 {ext or "(无)"} 不是表格后缀，已按文本猜测读取（分隔符 {meta.get("delimiter")}）；'
-        '若列对不上，请在源端改成 .csv/.txt']
+    meta['container'] = 'text'
+    meta['warnings'] = list(meta.get('warnings') or [])
+    if ext in EXCEL_EXTS:
+        meta['warnings'].append(
+            f'扩展名 {ext} 但内容不是 Excel 容器 (无 ZIP/OLE 文件头), 已按文本读取'
+            f'（分隔符 {meta.get("delimiter")}）；若列对不上，请核对分隔符')
+    elif ext not in TEXT_EXTS:
+        meta['warnings'].append(
+            f'扩展名 {ext or "(无)"} 不是表格后缀，已按文本猜测读取（分隔符 {meta.get("delimiter")}）；'
+            '若列对不上，请在源端改成 .csv/.txt')
     return df, meta
 
 
@@ -774,15 +819,20 @@ def _xlsx_safe_ints(df):
     return out
 
 
-def save_table(df, original_path, output_dir, stem=None, output_format='keep'):
+def save_table(df, original_path, output_dir, stem=None, output_format='keep',
+               source_container=None):
     """写出结果, 返回实际写出的路径列表 (第一个是主输出)。
 
     output_format:
-      keep  跟随输入 (Excel -> .xlsx, 文本 -> utf-8-sig 的 .csv) —— 默认
+      keep  跟随输入 (Excel 源 -> .xlsx, 文本源 -> utf-8-sig 的 .csv) —— 默认
       xlsx  一律 .xlsx
       csv   一律 .csv (utf-8-sig)。实测 20 万行写 xlsx 16.7s, 写 csv 0.6s
       both  两种都写, 便于"给人看用 xlsx, 给下游脚本用 csv"
     扩展名始终与真实内容一致, 不会把 .xls 改名成 .xlsx 却仍是旧格式。
+
+    source_container: 源文件的真实格式 ('excel'/'text'), 来自 read_table 的 meta。
+    keep 跟随的是**它**而不是后缀 —— 后缀是 .xlsx 但内容其实是 csv 的文件,
+    输出写 .csv, 否则给出的是一个扩展名与内容不符的文件。不传则退回后缀口径。
 
     stem: 显式指定输出主文件名 (不含 _cleaned 与扩展名), 用于批量模式下
     不同子目录同名文件的防冲突。
@@ -790,7 +840,8 @@ def save_table(df, original_path, output_dir, stem=None, output_format='keep'):
     name = stem or os.path.splitext(os.path.basename(original_path))[0]
     ext = os.path.splitext(original_path)[1].lower()
     os.makedirs(output_dir, exist_ok=True)
-    is_excel_src = ext in ('.xls', '.xlsx', '.xlsm')
+    is_excel_src = (source_container == 'excel') if source_container \
+        else ext in EXCEL_EXTS
     fmt = (output_format or 'keep').lower()
     if fmt == 'keep':
         targets = ['xlsx'] if is_excel_src else ['csv']
@@ -1049,7 +1100,8 @@ def process_file(file_path, output_dir, config, progress=None):
     if progress:
         progress(0.85, 'write')
     out_paths = save_table(df, file_path, output_dir, stem,
-                           config.get('output_format', 'keep'))
+                           config.get('output_format', 'keep'),
+                           source_container=meta.get('container'))
     if progress:
         progress(1.0, 'save')
     report['warnings'].extend(meta.get('warnings') or [])

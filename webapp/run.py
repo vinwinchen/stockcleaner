@@ -191,6 +191,19 @@ class DialogBridge:
             root.destroy()
 
 
+def _access_token():
+    """访问 token: 优先 SC_TOKEN 环境变量 (打包/CI/自动化想钉死时用), 否则每次启动随机生成。
+
+    服务端在导入时读 SC_TOKEN (见 backend/app.py 的 _TOKEN), 所以这里必须先于 serve()
+    把它写进环境 —— 顺序反了就会生成一个谁也不知道的 token, /api 全 403。
+    """
+    existing = (os.environ.get('SC_TOKEN') or '').strip()
+    if existing:
+        return existing
+    import secrets
+    return secrets.token_urlsafe(32)
+
+
 def main():
     parser = argparse.ArgumentParser(description='StockCleaner 本地服务 + 桌面壳')
     parser.add_argument('--dev', nargs='?', const='http://localhost:5173', default=None,
@@ -198,6 +211,9 @@ def main():
     parser.add_argument('--no-shell', action='store_true', help='不开窗口, 用系统浏览器')
     parser.add_argument('--port', type=int, default=0)
     args = parser.parse_args()
+
+    token = _access_token()
+    os.environ['SC_TOKEN'] = token
 
     try:
         _server, port = serve(args.port)
@@ -223,10 +239,16 @@ def main():
         else:
             url = args.dev
 
+    # token 走 URL 的 fragment: 按 URL 规范 fragment 不会发给服务端, 所以窗口能先拿到页面,
+    # 页面再把它带进每个 /api 请求 (见 app.py 的 TokenGuard 与 frontend/src/api.ts)。
+    url = f'{url}#sc_token={token}'
+
     if args.no_shell:
         bind_native_bridge(DialogBridge(None))
         webbrowser.open(url)
         print(f'[StockCleaner] 服务: {base}\n[StockCleaner] 前端: {url}\n'
+              f'[StockCleaner] 访问 token: {token}\n'
+              f'               (给 api_selftest.py --token 用; SC_TOKEN 可钉死)\n'
               f'[StockCleaner] Ctrl+C 退出')
         try:
             while True:

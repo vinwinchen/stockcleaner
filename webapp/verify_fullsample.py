@@ -22,6 +22,10 @@ import urllib.error
 import uuid
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8720').rstrip('/')
+# 访问 token: 服务端要求所有 /api/* 带它 (见 backend/app.py 的 TokenGuard)。
+TOKEN = os.environ.get('SC_TOKEN') or ''
+if '--token' in sys.argv:
+    TOKEN = sys.argv[sys.argv.index('--token') + 1]
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLES = os.path.join(HERE, 'samples')
 CSV = os.path.join(SAMPLES, '全功能验证.csv')
@@ -51,6 +55,8 @@ def raw_call(path, payload=None, timeout=120):
     req = urllib.request.Request(BASE + path, data=data, method='POST' if data else 'GET')
     if data:
         req.add_header('Content-Type', 'application/json')
+    if TOKEN:
+        req.add_header('X-SC-Token', TOKEN)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode('utf-8'))
@@ -69,7 +75,7 @@ def check(label, cond, detail=''):
 
 
 def sse_collect(job_id, timeout=120):
-    req = urllib.request.Request(f'{BASE}/api/jobs/{job_id}/events')
+    req = urllib.request.Request(f'{BASE}/api/jobs/{job_id}/events?t={TOKEN}')
     events = []
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         deadline = time.time() + timeout

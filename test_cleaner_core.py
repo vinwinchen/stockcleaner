@@ -891,6 +891,90 @@ def test_progress_callback_monotonic():
     print('[ok] 阶段进度回调单调且收于 1.0, 缺省零开销')
 
 
+def test_formula_cells_are_written_as_text():
+    """输出侧公式注入 (CWE-1236): =/@/+ 开头的文本格在 xlsx 里必须写成文本。
+
+    只比"读回来的字符串相等"是不够的 —— 公式格读回来也是那串字符。真正的区别在
+    存储类型: openpyxl 把 '=' 开头的字符串写成 <f> 公式节点, 用户在 Excel 里打开
+    输出即被求值; 置 data_type='s' 才写成 <is><t> 文本, 原文逐字保留、不加前缀。
+    """
+    import csv as _csv
+    import zipfile
+
+    import openpyxl
+
+    payloads = ['=HYPERLINK("http://evil/","点我")', '=cmd|\' /C calc\'!A0',
+                '@SUM(1,1)', '+1+1', '-1+1', '普通备注']
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'evil.csv')
+    with open(src, 'w', encoding='utf-8', newline='') as fh:
+        w = _csv.writer(fh)
+        w.writerow(['备注', '其它'])
+        for i, p in enumerate(payloads):
+            w.writerow([p, f'行{i}'])
+
+    rep, out = process_file(src, tmp, dict(BASE_CFG, output_format='xlsx'))
+    wb = openpyxl.load_workbook(out)
+    ws = wb.active
+    got = [ws.cell(row=r, column=1).value for r in range(2, 2 + len(payloads))]
+    assert got == payloads, (got, '输出内容被改写或加前缀了')
+    kinds = {ws.cell(row=r, column=1).data_type for r in range(2, 2 + len(payloads))}
+    assert kinds == {'s'}, kinds
+    with zipfile.ZipFile(out) as z:
+        xml = z.read('xl/worksheets/sheet1.xml')
+    assert b'<f>' not in xml, '输出 xlsx 里仍存在公式节点'
+    # 报告要说出实情: 命中几格、xlsx 那侧装了什么防护
+    risky = [p for p in payloads if p[:1] in ('=', '+', '-', '@', '\t', '\r')]
+    assert len(risky) == 5, risky
+    hit = [w for w in rep['warnings'] if '公式求值' in w]
+    assert len(hit) == 1 and str(len(risky)) in hit[0], rep['warnings']
+    assert 'xlsx 输出已按文本写入' in hit[0], hit[0]
+
+    # 清洗自身能把无害文本变成载荷: 全角 Ｘ＝１＋１ 先被全角转半角折成 X=1+1,
+    # 再由去字符去掉开头的 X, 到写出这一步已经是活公式的字面量了
+    src2 = os.path.join(tmp, 'fw.csv')
+    with open(src2, 'w', encoding='utf-8') as fh:
+        fh.write('备注\nＸ＝１＋１\n')
+    _rep2, out2 = process_file(src2, tmp, dict(BASE_CFG, fullwidth=True,
+                                               strip_tokens=['X'], output_format='xlsx'))
+    cell = openpyxl.load_workbook(out2).active.cell(row=2, column=1)
+    assert cell.value == '=1+1' and cell.data_type == 's', (cell.value, cell.data_type)
+    print('[ok] 公式注入: =/@/+ 文本格按文本写入, 且不放过清洗自己造出来的载荷')
+
+
+def test_numeric_magnitude_bounds_keep_original():
+    """指数与位数越界一律按解析失败保留原值。
+
+    旧实现两条路都不可接受: '1e999999999' 只有 11 字节, 却要算 10**999999999 级的大
+    整数 (实测单格卡死进程), 而 4301 位数字串触发 CPython 的 int<->str 转换上限
+    抛 ValueError —— 异常冒出去就不是"这一格保留原值", 而是整份文件失败 (实测连
+    输出目录都没建)。界内写法一个都不能受影响。
+    """
+    assert parse_numeric('1e999999999') is None
+    assert parse_numeric('1e5000') is None
+    assert parse_numeric('9' * 4301) is None
+    assert parse_numeric('1' + '0' * 4299) is None
+    # 界内: 大整数照样精确 (与大整数往返那条测试同一立场)
+    assert parse_numeric('1e309') == 10 ** 309
+    assert parse_numeric('1.5e9') == 1500000000
+    assert parse_numeric('1e3') == 1000
+    assert parse_numeric('1.5万') == 15000
+    assert parse_numeric('9' * 50) == int('9' * 50)
+
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'huge.csv')
+    with open(src, 'w', encoding='utf-8') as fh:
+        fh.write('a,b\n1e5000,ok\n2,3\n')
+    rep, out = process_file(src, tmp, dict(BASE_CFG))
+    assert os.path.exists(out), '越界格子仍把整份文件带崩了'
+    df_out, _meta = read_table(out)
+    vals_a = df_out['a'].tolist()
+    assert str(vals_a[0]) == '1e5000', vals_a        # 越界格保留原值
+    assert str(vals_a[1]) == '2', vals_a             # 同一列的正常格照常数值化, 行不错位
+    assert rep['rows_out'] == 2
+    print('[ok] 数值越界: 指数/位数上界保留原值, 不挂死也不整份失败')
+
+
 if __name__ == '__main__':
     test_parse_numeric()
     test_numericize_id_column()
@@ -927,4 +1011,6 @@ if __name__ == '__main__':
     test_utf16_bom_read_and_binary_reject()
     test_container_overrides_extension()
     test_progress_callback_monotonic()
+    test_formula_cells_are_written_as_text()
+    test_numeric_magnitude_bounds_keep_original()
     print('\n全部测试通过 ✔')

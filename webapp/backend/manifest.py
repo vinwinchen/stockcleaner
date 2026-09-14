@@ -27,9 +27,18 @@ _WRITE_LOCK = threading.RLock()
 
 def _atomic_write(path, payload):
     tmp = f'{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp'
-    with open(tmp, 'w', encoding='utf-8') as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    finally:
+        # 替换失败 (WinError 32 等) 不留孤儿 tmp: 它会被 is_scannable 的 *.tmp 规则
+        # 挡在扫描之外, 但会一直躺在输出目录里, 越攒越多
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return path
 
 
@@ -42,16 +51,24 @@ def manifest_path(output_dir):
 
 
 def load(path):
-    """读一个登记文件。损坏/读不到一律当空, 不抛异常也不静默排除任何东西。"""
-    try:
-        with open(path, encoding='utf-8') as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    outputs = data.get('outputs') if isinstance(data, dict) else None
-    if not isinstance(outputs, dict):
-        return {}
-    return {k: v for k, v in outputs.items() if isinstance(v, dict)}
+    """读一个登记文件。损坏/读不到一律当空, 不抛异常也不静默排除任何东西。
+
+    读侧也持 _WRITE_LOCK。写侧是 os.replace 换文件, 而 Windows 上目标文件正被
+    别人打开时 replace 会以 WinError 32 失败 (上面的注释已为"写-写"踩过一次)。
+    以前只串了写者, 读-写仍会撞: 失败的那次登记被 run_file 降级成一句 warning,
+    该产出从此不在登记里, 下次扫描就重吃自己的输出。RLock 允许 record/prune_missing
+    内部重入, 不会自锁。
+    """
+    with _WRITE_LOCK:
+        try:
+            with open(path, encoding='utf-8') as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+        outputs = data.get('outputs') if isinstance(data, dict) else None
+        if not isinstance(outputs, dict):
+            return {}
+        return {k: v for k, v in outputs.items() if isinstance(v, dict)}
 
 
 def registered_outputs(roots, output_dir=None):

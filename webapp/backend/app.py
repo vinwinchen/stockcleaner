@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import hmac
 import json
 import os
 import queue
@@ -25,10 +26,27 @@ from fastapi.staticfiles import StaticFiles
 from . import core
 from .jobs import registry
 
-APP_VERSION = '2.2.5'
+APP_VERSION = '2.2.6'
 # 单次拖拽上传的总量上限。没有上限时, 一次拖进来的东西可以无限写满系统临时目录
 # (落盘发生在任何一个字节被解析之前), 而本机进程面本来就无鉴权。
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
+# 除上传外所有接口的请求体上限: 这些接口只收 JSON 配置, 8 MiB 远超任何真实请求。
+# request.json() 会把整个请求体收进内存, 没有上限就是一个内存放大器。
+MAX_JSON_BYTES = 8 * 1024 ** 2
+# 给 multipart 分隔头/多文件留的余量。上传体在这条线以内仍然走到应用层的逐文件
+# 配额 ("xxx.csv: 超过单次上限 N MB, 已丢弃"), 中间件只拦真正离谱的体量 ——
+# 那条逐文件提示是给用户看的, 不能让中间件把它的机会抢掉。
+MAX_MULTIPART_SLACK = 32 * 1024 ** 2
+# 访问 token: 桌面壳启动时生成 (run.py), 随窗口 URL 的 fragment 交给前端, 前端在每个
+# /api 请求上带回来。打包产物/CI 可以直接用 SC_TOKEN 环境变量钉一个, 免得生成后没人知道。
+#
+# 为什么需要: Host/Origin 守卫只回答"你是不是本机、同源", 不回答"你是不是我开的那个窗口"。
+# 端口是本机任意进程都能扫到的, 于是**权限比用户低**的本机程序 (受限令牌/沙箱进程: 连得上
+# 回环却读不到用户文件) 可以借这套 API 读任意文本文件、往任意可写目录落文件 —— 拿本工具
+# 当"内应"(confused deputy)。token 让它猜不出来。
+# 边界必须说清: 这挡不住同权限的进程 (能读本进程内存/浏览器存储, token 一样拿得到),
+# 只是把门槛从"知道端口"抬到"得是那个窗口"。空值 = 未配置, 一律拒绝 (失败要响)。
+_TOKEN = (os.environ.get('SC_TOKEN') or '').strip()
 _WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL'} | {f'COM{i}' for i in range(1, 10)} \
                 | {f'LPT{i}' for i in range(1, 10)}
 
@@ -171,6 +189,171 @@ class LocalOnlyGuard:
         await self.app(scope, receive, send)
 
 
+class TokenGuard:
+    """/api/* 必须带访问 token: 请求头 X-SC-Token, 或 SSE 用的 ?t=。
+
+    静态资源**不设防**, 这是有意的: 窗口首次导航拿不到任何自定义请求头 (token 在 URL 的
+    fragment 里, 按 URL 规范 fragment 不会发给服务端), 得先把页面发出去, 页面才有机会把
+    token 带上。静态资源里没有任何用户数据, 真正的能力全在 /api/* 上。
+
+    EventSource 不能设请求头, 所以 SSE 那条额外认 ?t= (访问日志本来就关着)。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http' or not (scope.get('path') or '').startswith('/api/'):
+            await self.app(scope, receive, send)
+            return
+        supplied = self._supplied(scope)
+        if _TOKEN and supplied and hmac.compare_digest(supplied, _TOKEN):
+            await self.app(scope, receive, send)
+            return
+        message = ('未配置访问 token (SC_TOKEN), 拒绝所有 /api 请求'
+                   if not _TOKEN else '未授权的本机访问')
+        body = json.dumps({'error': message}, ensure_ascii=False).encode('utf-8')
+        await send({'type': 'http.response.start', 'status': 403,
+                    'headers': [(b'content-type', b'application/json; charset=utf-8'),
+                                (b'content-length', str(len(body)).encode('ascii'))]})
+        await send({'type': 'http.response.body', 'body': body})
+
+    @staticmethod
+    def _supplied(scope):
+        for k, v in scope.get('headers') or []:
+            if k.lower() == b'x-sc-token':
+                return v.decode('latin-1').strip()
+        query = scope.get('query_string') or b''
+        if query:
+            values = urllib.parse.parse_qs(query.decode('latin-1')).get('t') or []
+            if values:
+                return values[0].strip()
+        return ''
+
+
+class _BodyTooLarge(Exception):
+    """请求体超过上限 (只在中间件内部用, 不冒到应用层)。"""
+
+
+def _body_limit(path):
+    if path == '/api/upload':
+        return MAX_UPLOAD_BYTES + MAX_MULTIPART_SLACK
+    return MAX_JSON_BYTES
+
+
+class BodyLimitGuard:
+    """请求体上限 (纯 ASGI 中间件, 与 LocalOnlyGuard 同层)。
+
+    为什么必须在中间件里做: starlette 的 request.form() / request.json() 是**先**把整个
+    请求体收完再交给应用 —— 文件部分超过 1 MiB 就溢写到真实临时文件, 之后应用里那套
+    分块计数才开始跑。也就是说应用内那道上限只约束了"第二次拷贝", 解析阶段该写满盘
+    照样写满 (单个 file part 发 100 GiB, 解析器会一直往里写)。
+
+    两条路径用两套做法, 因为体量差三个数量级, 而且应用侧对异常的态度不同:
+      - 非上传接口只收 JSON, 上限 8 MiB: 自己读完再交给应用, 超限根本不进应用。
+        不能靠"从 receive 里抛异常" —— _body 的 `except Exception: return {}` 会把任何
+        异常吞掉 (那是它在边界上该做的), 上限就白设了。
+      - /api/upload 的体可达 GiB 级, 绝不能缓冲: 边收边数, 超限从 receive 里抛出。
+        upload 在读完整个体之前不会回响应, 且 request.form() 外没有 except, 异常能冒到这里。
+    能读到 Content-Length 时先直接 413, 省掉整个接收过程。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        path = scope.get('path') or ''
+        limit = _body_limit(path)
+        for k, v in scope.get('headers') or []:
+            if k.lower() == b'content-length':
+                try:
+                    declared = int(v)
+                except ValueError:
+                    break
+                if declared > limit:
+                    await self._reject(send, limit)
+                    return
+                break
+
+        if path == '/api/upload':
+            await self._pass_stream_capped(scope, receive, send, limit)
+        else:
+            await self._pass_buffered(scope, receive, send, limit)
+
+    async def _pass_buffered(self, scope, receive, send, limit):
+        chunks, total = [], 0
+        while True:
+            message = await receive()
+            if message['type'] != 'http.request':
+                break
+            body = message.get('body') or b''
+            total += len(body)
+            if total > limit:
+                await self._reject(send, limit)
+                return
+            chunks.append(body)
+            if not message.get('more_body'):
+                break
+        delivered = False
+
+        async def replay():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {'type': 'http.request', 'body': b''.join(chunks)}
+            # 之后的调用交还给真实流: SSE 的 request.is_disconnected() 靠它判断开,
+            # 一直回 disconnect 会把长连接立刻掐掉。
+            return await receive()
+
+        await self.app(scope, receive=replay, send=send)
+
+    async def _pass_stream_capped(self, scope, receive, send, limit):
+        received = 0
+        started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message['type'] == 'http.request':
+                received += len(message.get('body') or b'')
+                if received > limit:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            if message['type'] == 'http.response.start':
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive=limited_receive, send=tracking_send)
+        except _BodyTooLarge:
+            # 响应已经开出去就不能再补一个 (SSE 这类长连接会撞上 ASGI 协议错误);
+            # upload 在读体阶段不会先回响应, 走不到这个分支。
+            if not started:
+                await self._reject(send, limit)
+
+    @staticmethod
+    async def _reject(send, limit):
+        body = json.dumps(
+            {'error': f'请求体超过上限 {limit // (1 << 20)} MB'}, ensure_ascii=False
+        ).encode('utf-8')
+        await send({'type': 'http.response.start', 'status': 413,
+                    'headers': [(b'content-type', b'application/json; charset=utf-8'),
+                                (b'content-length', str(len(body)).encode('ascii'))]})
+        await send({'type': 'http.response.body', 'body': body})
+
+
+# 注册顺序: Starlette 的 add_middleware 是前插, 后加的在外层。所以从内到外加 ——
+#   外层 LocalOnlyGuard (来源不对就 403, 不陪它收请求体)
+#   → TokenGuard     (token 不对就 403, 同样不必收体)
+#   → 内层 BodyLimitGuard (到这里才值得读/限制请求体)
+app.add_middleware(BodyLimitGuard)
+app.add_middleware(TokenGuard)
 app.add_middleware(LocalOnlyGuard)
 
 # 预览结果缓存: (路径, mtime, 配置指纹) -> 结果。规则一改指纹就变, 不会读到旧结果。
@@ -423,19 +606,55 @@ async def job_events(job_id: str, request: Request):
                              headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
+def _prune_dropped(keep_days=7):
+    """清掉过期的 dropped-* 落盘目录, 返回删掉几个。
+
+    上传的字节落在 %TEMP%/StockCleaner/dropped-*/ (随机名, 见 upload), 从前无人回收: 单次拖拽上限
+    2 GiB, 拖几次就永久占着系统临时目录 (系统没有替应用清临时目录的义务)。只删比
+    keep_days 更老的 —— 本轮任务引用的是刚落的目录, 永远扫不到, 所以不会删掉队列里
+    正在等清洗的文件。删不掉 (被别的进程占着等) 就跳过, 不影响这次上传。
+    """
+    import shutil
+
+    root = os.path.join(tempfile.gettempdir(), 'StockCleaner')
+    cutoff = time.time() - keep_days * 86400
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return 0
+    removed = 0
+    for entry in entries:
+        if not entry.name.startswith('dropped-'):
+            continue
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        removed += 1
+    return removed
+
+
 @app.post('/api/upload')
 async def upload(request: Request):
     """拖拽进来的文件只有文件名没有绝对路径 (WebView 的安全边界)。
 
     这里把字节落到系统临时目录再交给同一套内核, 而不是在前端伪造路径。
     """
+    _prune_dropped()
     form = await request.form()
     files = [v for v in form.getlist('files') if isinstance(v, UploadFile)]
     if not files:
         return JSONResponse({'error': '没有收到文件'}, status_code=400)
-    stamp = time.strftime('%Y%m%d-%H%M%S')
-    target_dir = os.path.join(tempfile.gettempdir(), 'StockCleaner', f'dropped-{stamp}')
-    os.makedirs(target_dir, exist_ok=True)
+    # mkdtemp: 随机名 + 独占创建。原来用秒级时间戳命名, 名字可预测 —— 攻击者能在
+    # 清理之后、上传之前, 在 %TEMP%\StockCleaner 下摆一个同名 junction 把上传内容
+    # 引到任意目录 (实测顺着 junction 写, 字节确实落在其目标目录; 且 os.path.islink
+    # 对 junction 返回 False, 只有 lstat 的 REPARSE_POINT 位看得出来, 靠 islink 防不住)。
+    # 随机名让"预先摆好"这件事不成立。
+    base = os.path.join(tempfile.gettempdir(), 'StockCleaner')
+    os.makedirs(base, exist_ok=True)
+    target_dir = tempfile.mkdtemp(prefix='dropped-', dir=base)
     saved = []
     rejected = []
     total = 0
@@ -443,6 +662,11 @@ async def upload(request: Request):
         # 只取 basename, 丢掉任何目录成分: 防止 ../ 逃逸到别处
         safe = os.path.basename(str(field.filename or 'pasted').replace('\\', '/'))
         safe = re.sub(r'[\x00-\x1f<>:"|?*]', '_', safe).strip() or 'pasted'
+        # basename('.') / ('..') 仍是目录本身, 不是文件名: 落盘会撞上目录, 而 Windows
+        # 抛的是 PermissionError 而不是 FileExistsError, 旧实现直接 500, 并把**整批**
+        # 上传一起丢掉 (实测 ['good.csv','..','good2.csv'] 三个都没落盘, 无任何提示)。
+        if safe in ('.', '..'):
+            safe = 'pasted'
         stem, ext = os.path.splitext(safe)
         if ext and not core.is_scannable(stem + ext):
             # 明确二进制的后缀 (拖进来也只可能是误拖) 一律按 .csv 落盘;
@@ -456,16 +680,21 @@ async def upload(request: Request):
         # 占位必须原子: 旧实现 exists 检查与 open 之间有竞态窗口, 同一秒内并发
         # 拖入的同名文件会双双通过检查, 后写者静默覆盖先写者。O_CREAT|O_EXCL
         # 让内核保证只有一个赢家, 输的那一方拿到下一个序号。
+        # 兜 OSError 而不只是 FileExistsError: 名字撞上目录/保留设备时 Windows 抛的是
+        # PermissionError, 漏出去就是 500 + 整批上传作废。有上限, 免得在这里空转。
         n = 0
-        while True:
+        fd = None
+        while fd is None and n < 1000:
             dest = os.path.join(target_dir, stem + ext) if n == 0 \
                 else os.path.join(target_dir, f'{stem} ({n}){ext}')
             try:
                 fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                              | getattr(os, 'O_BINARY', 0), 0o666)
-                break
-            except FileExistsError:
+            except OSError:
                 n += 1
+        if fd is None:
+            rejected.append(f'{safe}: 无法落盘, 已丢弃')
+            continue
         written = 0
         try:
             with os.fdopen(fd, 'wb') as fh:

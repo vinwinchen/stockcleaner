@@ -28,6 +28,10 @@ from .manifest import MANIFEST_NAME
 # 扩展名清单来自内核 (以前这里抄了一份, 结果 .xlsm 能读、能出 xlsx, 却扫不到)。
 DEFAULT_SAMPLE_ROWS = 500
 MAX_PREVIEW_SAMPLES = 12          # 每列展示几组 原值 -> 结果
+# 列检视的列数上限。行方向本来就有 80/60/24 三道截断, 列方向此前一道都没有:
+# 逐列分析是 O(行x列), 而列数由文件决定 —— 一行含几十万列的 CSV 只要几 MB,
+# 就能把 CPU 占满、响应体随列数无界增长。截断由 preview_file 标注进报告, 不静默。
+MAX_PREVIEW_COLS = 300
 DEFAULT_CONFIG = {
     'strip_tokens': [],
     'strip_column_mode': False,
@@ -164,6 +168,13 @@ def _output_targets(path, fmt='keep'):
     会写出 .csv。这条必须与内核 save_table 的口径一致, 否则队列里预告的名字
     和实际产出对不上, 同名防覆盖也会算错组。
     """
+    # 口径归一化放在这里, 因为分组 (build_stem_map) 与预告 (plan_outputs) 都从本函数
+    # 取目标扩展名。任何一处漏了归一化, 大小写差异 ('CSV') 就会让两边按不同的目标
+    # 分组: 该去冲突的组被判成"不冲突", 两个文件写同一个输出路径 (实测丢一份结果)。
+    # 白名单与 normalize_config 同源, 认不出的格式回落 keep。
+    fmt = str(fmt or 'keep').strip().lower()
+    if fmt not in ('keep', 'xlsx', 'csv', 'both'):
+        fmt = 'keep'
     container = sniff_container(path)
     if container is None:                        # 读不了头: 退回后缀口径
         container = 'excel' if str(path).lower().endswith(EXCEL_EXTS) else 'text'
@@ -208,8 +219,12 @@ def public_report(report, path=None, output_format='keep'):
 
 # ---------------------------------------------------------------- 列分析
 
-def analyze_columns(original, cleaned, report, cfg):
+def analyze_columns(original, cleaned, report, cfg, max_columns=MAX_PREVIEW_COLS):
     """逐列给出: 识别类型、变更格数、样本对照 (原值 -> 结果)。
+
+    只分析前 max_columns 列 (与行方向的三道截断同口径), 理由见 MAX_PREVIEW_COLS:
+    列数是文件给的, 不设上限就等于让一个文件决定这次预览跑多久、响应有多大。
+    截断由调用方标注进报告, 不静默。
 
     两条对齐规矩, 都是实测踩出来的:
     1. 改动判定按**索引**配对, 不能按位置 zip。删过行的话, 第 i 格的原值会去和第 i+1 格
@@ -232,7 +247,7 @@ def analyze_columns(original, cleaned, report, cfg):
     unalignable = False
     columns = []
 
-    for col in cleaned.columns:
+    for col in list(cleaned.columns)[:max_columns]:
         name = str(col)
         added_from = created.get(name)
         olabel = col if col in original.columns else orig_by_label.get(name)
@@ -298,6 +313,10 @@ def analyze_columns(original, cleaned, report, cfg):
     notes = []
     if unalignable:
         notes.append('本文件行索引有重复, 列检视的原值/结果只能按位置对齐, 行号仅供参考')
+    if len(cleaned.columns) > max_columns:
+        # 截断必须说出来: 界面上"只有前 300 列有分析"若不可见, 用户会以为后面的列没被改动
+        notes.append(f'列数 {len(cleaned.columns)} 超过列检视上限 {max_columns}: '
+                     f'只分析了前 {max_columns} 列, 其余列照常清洗但不在报告里逐列展开')
     return columns, removed, notes
 
 
@@ -388,7 +407,9 @@ def preview_file(path, raw_config):
         'removed_columns': removed,
         'grid': grid,
         'preview': {'columns': preview_cols, 'rows': rows,
-                    'truncated_columns': max(0, len(columns) - len(preview_cols))},
+                    # 用文件真实列数算, 不用被 MAX_PREVIEW_COLS 截断后的列表长度:
+                    # 否则列多到被截断时, 这个字段反而报 0 (说自己没截断)
+                    'truncated_columns': max(0, int(cleaned.shape[1]) - len(preview_cols))},
         'report': _preview_report(report, read_warnings, path, cfg['output_format']),
     }
 
@@ -599,8 +620,9 @@ def build_stem_map(paths, output_format='keep'):
     强行改名反而让输出名不可读; 选 xlsx/both 时两者都会写 x_cleaned.xlsx,
     这才是真冲突。真冲突的组内, 用"相对共同祖先的路径"拼唯一名 (d1_x);
     同目录同名不同扩展 (x.csv / x.xlsx 被强制同格式) 补源扩展名 (x_csv);
-    跨盘 (commonpath 失败) 退化为全路径。收尾一致性检查兜底,
-    "同组不同文件不同 stem" 由本函数无条件保证。
+    跨盘 (commonpath 失败) 退化为全路径。最后再做一轮全批收敛,
+    "**同一批内不会有两个文件写出同一个主文件名**" 由本函数无条件保证
+    (只保证组内唯一是不够的, 见下面收敛段的注释)。
 
     旧实现拿调用方传入的 roots 找"所属根", 但 /api/run 把每个文件自己的目录
     也当 root 传进来, rel 永远是裸文件名, 两个同名文件拼出同一个 stem ——
@@ -647,8 +669,37 @@ def build_stem_map(paths, output_format='keep'):
                 stems[p] = unique_stem(p)
         for p, s in stems.items():
             stem_map[p] = s
-            if s != os.path.splitext(os.path.basename(p))[0]:
-                renamed.append({'from': os.path.basename(p), 'to': f'{s}_cleaned'})
+
+    # 全批收敛: 生成名必须与**批内每个文件**的最终名比对 —— 组内唯一不等于全批唯一。
+    # 只按组去冲突时, 生成名可以正好等于一个不重复文件的 stem: 目录里本来就有一\二_x.csv,
+    # 而 二\x.csv 被去冲突成 二_x, 两者都写 二_x_cleaned.csv, 后跑的那个静默覆盖先跑的,
+    # 两条 file_done 都报 ok, 登记里也只剩一条 (实测复现)。判定口径与去重一致 (normcase),
+    # 处理顺序按 (最终名, 路径) 排序: 同一批输入每次得到同一套名字, 输出名可复现。
+    uniq = {}
+    for group in groups.values():
+        for p in group:
+            uniq.setdefault(_key_of(p), p)
+
+    def final_stem(p):
+        return stem_map.get(p) or os.path.splitext(os.path.basename(p))[0]
+
+    taken = set()
+    for p in sorted(uniq.values(),
+                    key=lambda x: (os.path.normcase(final_stem(x)), os.path.normcase(x))):
+        stem, n = final_stem(p), 1
+        while os.path.normcase(stem) in taken:
+            n += 1
+            stem = f'{final_stem(p)}_{n}'
+        taken.add(os.path.normcase(stem))
+        if stem != final_stem(p):
+            stem_map[p] = stem
+
+    # 改名清单按最终结果统一生成: 上面两轮改名都可能落到同一个文件, 在循环里 append
+    # 会给出自相矛盾的两条
+    for p in sorted(stem_map):
+        stem = stem_map[p]
+        if stem != os.path.splitext(os.path.basename(p))[0]:
+            renamed.append({'from': os.path.basename(p), 'to': f'{stem}_cleaned'})
     return stem_map, renamed
 
 

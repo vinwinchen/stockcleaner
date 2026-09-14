@@ -25,11 +25,17 @@ import time
 import urllib.error
 import urllib.request
 
+# 冒烟测试自己钉一个访问 token 并用它启动 exe (SC_TOKEN 会被子进程继承):
+# 服务端要求所有 /api/* 带它, 而打包后的 exe 无控制台, 打印出来的 token 看不到 ——
+# 由测试端指定才不会出现"生成了但没人知道"。
+TOKEN = os.environ.get('SC_TOKEN') or 'smoke-test-token'
+
 
 def http_json(method, url, payload=None, timeout=10):
     data = json.dumps(payload).encode('utf-8') if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method,
-                                 headers={'Content-Type': 'application/json'})
+                                 headers={'Content-Type': 'application/json',
+                                          'X-SC-Token': TOKEN})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
@@ -63,7 +69,8 @@ def main():
             raise SystemExit('[FAIL] 找不到 exe, 或缺 --base')
         port = args.port
         proc = subprocess.Popen([os.path.abspath(args.exe), '--port', str(port)],
-                                cwd=os.path.dirname(os.path.abspath(args.exe)))
+                                cwd=os.path.dirname(os.path.abspath(args.exe)),
+                                env={**os.environ, 'SC_TOKEN': TOKEN})
         base = f'http://127.0.0.1:{port}'
         print(f'[1/5] 已启动 {args.exe} (port {port}), 等待 /api/meta ...')
 

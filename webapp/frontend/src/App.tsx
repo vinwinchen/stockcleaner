@@ -302,7 +302,12 @@ export default function App() {
   const toggleProtect = (column: string, protect: boolean) => {
     setStale(true)
     setConfig((prev) => {
-      const overrides = { ...prev.column_overrides }
+      // 这里的 column 是表头, 也就是被打开文件里的字符串 (攻击者可控)。普通对象上
+      // overrides['__proto__'] = ... 走的是 Object.prototype 的访问器, 不产生自有属性:
+      // Object.keys 看不到它、JSON.stringify 也不会发出去, 于是用户点下的"保护该列"
+      // 静默丢失, 那列照常被数值化/改写。null 原型对象没有那个访问器, 赋值就是普通赋值。
+      const overrides: Record<string, { protect: boolean }> = Object.create(null)
+      Object.assign(overrides, prev.column_overrides)
       if (protect) overrides[column] = { protect: true }
       else delete overrides[column]
       return { ...prev, column_overrides: overrides }

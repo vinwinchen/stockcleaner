@@ -2,8 +2,8 @@
 """服务层契约自测: 对着一个已启动的本地服务跑完整链路。
 
 用法:
-  python run.py --port 8720 --no-shell      # 另开一个终端
-  python api_selftest.py [base_url]         # 默认 http://127.0.0.1:8720
+  python run.py --port 8720 --no-shell      # 另开一个终端 (启动时会打印访问 token)
+  python api_selftest.py [base_url] --token <token>   # token 也可用 SC_TOKEN 环境变量给
 
 覆盖: meta -> collect -> inspect -> preview(列保护/规则变更) -> run -> SSE -> 输出内容核对
 -> 拖拽上传(同名防覆盖/并发不互覆),
@@ -21,6 +21,11 @@ import urllib.error
 import uuid
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8720').rstrip('/')
+# 访问 token: 服务端要求所有 /api/* 带它 (见 backend/app.py 的 TokenGuard)。
+# 优先命令行 `--token X`, 其次 SC_TOKEN 环境变量; run.py --no-shell 会把生成的 token 打出来。
+TOKEN = os.environ.get('SC_TOKEN') or ''
+if '--token' in sys.argv:
+    TOKEN = sys.argv[sys.argv.index('--token') + 1]
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLES = os.path.join(HERE, 'samples')
 
@@ -49,6 +54,8 @@ def raw_call(path, payload=None, timeout=60):
     req = urllib.request.Request(BASE + path, data=data, method='POST' if data else 'GET')
     if data:
         req.add_header('Content-Type', 'application/json')
+    if TOKEN:
+        req.add_header('X-SC-Token', TOKEN)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode('utf-8'))
@@ -68,7 +75,7 @@ def check(label, cond, detail=''):
 
 def sse_collect(job_id, want_done, timeout=60):
     """读 SSE 直到 done 数达标; 顺带验证事件可重放 (断开再连一次)。"""
-    req = urllib.request.Request(f'{BASE}/api/jobs/{job_id}/events')
+    req = urllib.request.Request(f'{BASE}/api/jobs/{job_id}/events?t={TOKEN}')
     events = []
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         deadline = time.time() + timeout
@@ -352,6 +359,8 @@ def main():
         chunks.append(f'--{boundary}--\r\n'.encode('utf-8'))
         req = urllib.request.Request(BASE + '/api/upload', data=b''.join(chunks), method='POST')
         req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+        if TOKEN:
+            req.add_header('X-SC-Token', TOKEN)
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read().decode('utf-8'))
 

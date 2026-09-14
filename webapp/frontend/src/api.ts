@@ -2,10 +2,26 @@ import type { Config, FilePlan, JobEvent, PreviewResult } from './types'
 
 const BASE = ''
 
+const TOKEN_KEY = 'sc_token'
+
+// 本机访问 token: 壳把窗口加载到 `#sc_token=...`, 这里取出来带到每个请求上。
+// 不是"登录", 是让服务端确认"你是本窗口" —— 服务端只认 X-SC-Token (?t= 只给 SSE 用,
+// 因为 EventSource 不能设请求头)。fragment 按 URL 规范不发给服务端, 首屏因此能先加载。
+// 同时存一份到 sessionStorage: 刷新/路由变化后 fragment 仍在, 两份互为兜底
+// (隐私模式下存储会抛, 忽略即可, 那时只剩 fragment 那一份)。
+const hashToken = /(?:^|[#&])sc_token=([^&]+)/.exec(window.location.hash)?.[1]
+let TOKEN = hashToken || ''
+try {
+  if (hashToken) sessionStorage.setItem(TOKEN_KEY, hashToken)
+  else TOKEN = sessionStorage.getItem(TOKEN_KEY) || ''
+} catch {
+  /* 存储被禁: 只用 fragment 里那份 */
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-SC-Token': TOKEN },
     body: JSON.stringify(body ?? {}),
   })
   const data = await res.json().catch(() => ({ error: `本地服务无响应 (${res.status})` }))
@@ -55,7 +71,8 @@ export type BrowseResult = {
 }
 
 export const api = {
-  meta: () => fetch(BASE + '/api/meta').then((r) => r.json() as Promise<Meta>),
+  meta: () => fetch(BASE + '/api/meta', { headers: { 'X-SC-Token': TOKEN } })
+    .then((r) => r.json() as Promise<Meta>),
 
   collect: (body: {
     files: string[]; dirs: string[]; recursive: boolean; output_dir: string; config?: Config
@@ -90,7 +107,10 @@ export function pushJobEvents(
   onEvent: (e: JobEvent) => void,
   onError?: () => void,
 ): () => void {
-  const es = new EventSource(`${BASE}/api/jobs/${jobId}/events`)
+  // EventSource 不能设请求头, 所以这条走 ?t= (服务端两种都认)
+  const es = new EventSource(
+    `${BASE}/api/jobs/${encodeURIComponent(jobId)}/events?t=${encodeURIComponent(TOKEN)}`,
+  )
   es.onmessage = (frame) => {
     try {
       onEvent(JSON.parse(frame.data) as JobEvent)
@@ -107,7 +127,9 @@ export type UploadResult = { paths: string[]; dir: string; rejected?: string[] }
 export async function uploadDropped(files: File[]): Promise<UploadResult> {
   const form = new FormData()
   files.forEach((f) => form.append('files', f))
-  const res = await fetch('/api/upload', { method: 'POST', body: form })
+  const res = await fetch('/api/upload', {
+    method: 'POST', headers: { 'X-SC-Token': TOKEN }, body: form,
+  })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || '拖拽接收失败')
   return { paths: data.paths as string[], dir: data.dir as string,

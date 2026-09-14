@@ -29,6 +29,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)                                  # backend 包
 sys.path.insert(1, os.path.dirname(ROOT))                 # cleaner_core
 
+# 服务端要求所有 /api/* 带访问 token (见 backend/app.py 的 TokenGuard)。必须在导入
+# backend.app 之前钉好 (它是导入时读的), 请求头由 _http_scope 统一带上; 想断言
+# "没带 token 会 403" 的用例显式传 token=''。
+os.environ.setdefault('SC_TOKEN', 'test-token')
+
 from backend import core, manifest                        # noqa: E402
 from backend.jobs import Job, REPLAY_WINDOW               # noqa: E402
 from cleaner_core import read_table, clean_table, cell_repr   # noqa: E402
@@ -399,7 +404,7 @@ def _asgi_post_get(app, scope, body=b''):
 
 
 def _http_scope(method, path, host='127.0.0.1:8731', origin=None,
-                content_type=None, body_len=None):
+                content_type=None, body_len=None, token=None, query=''):
     headers = [(b'host', host.encode())]
     if origin:
         headers.append((b'origin', origin.encode()))
@@ -407,9 +412,14 @@ def _http_scope(method, path, host='127.0.0.1:8731', origin=None,
         headers.append((b'content-type', content_type.encode()))
     if body_len:
         headers.append((b'content-length', str(body_len).encode()))
+    # token=None 取环境里那个 (正常路径); 传 token='' 就是"没带 token"的用例
+    token = os.environ.get('SC_TOKEN', '') if token is None else token
+    if token:
+        headers.append((b'x-sc-token', str(token).encode()))
     return {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.3'},
             'http_version': '1.1', 'method': method, 'scheme': 'http',
-            'path': path, 'raw_path': path.encode(), 'query_string': b'',
+            'path': path, 'raw_path': (path + (f'?{query}' if query else '')).encode(),
+            'query_string': query.encode(),
             'root_path': '', 'server': ('127.0.0.1', 8731),
             'client': ('127.0.0.1', 50000), 'headers': headers}
 
@@ -434,6 +444,37 @@ def test_local_only_guard_blocks_foreign_host_and_origin():
     assert status_of() == 200                                                  # 本机无 Origin
     assert status_of(origin='http://127.0.0.1:8731') == 200                    # 同源放行
     print('[ok] Host 回环 + Origin 同源守卫 (外部/伪装一律 403)')
+
+
+def test_token_guard_requires_window_token():
+    """所有 /api/* 必须带访问 token; 静态资源不设防。
+
+    为什么有这道: Host/Origin 守卫只回答"你是不是本机、同源", 不回答"你是不是我开的那个
+    窗口"。端口本机任意进程都扫得到, 于是一个**权限比用户低**的本机程序 (连得上回环却
+    读不到用户文件) 能借这套 API 读任意文本文件、往任意可写目录落文件 —— 拿本工具当内应。
+    见 backend/app.py 的 TokenGuard。
+    """
+    from backend.app import app as fastapi_app
+
+    tok = os.environ['SC_TOKEN']
+
+    def status_of(path, method='POST', **kw):
+        body = b'{}' if method == 'POST' else b''
+        s, _ = _asgi_post_get(fastapi_app, _http_scope(method, path, **kw), body)
+        return s
+
+    assert status_of('/api/meta', method='GET', token='') == 403           # 没带 token
+    assert status_of('/api/meta', method='GET', token='wrong') == 403      # 带了但不对
+    assert status_of('/api/meta', method='GET', token=tok) == 200          # 对
+    assert status_of('/api/run', token=tok) != 403                         # 写接口同样是"带对就放行"
+    # EventSource 不能设请求头, 所以 SSE 那条必须认 ?t=
+    assert status_of('/api/meta', method='GET', token='', query=f't={tok}') == 200
+    assert status_of('/api/meta', method='GET', token='', query='t=wrong') == 403
+    # 静态资源不设防: 首屏导航拿不到任何自定义头 (token 在 fragment 里, 不发给服务端)
+    assert status_of('/', method='GET', token='') != 403
+    # 来源不对仍然先挡 (LocalOnlyGuard 在最外层), 不带 token 也轮不到它
+    assert status_of('/api/meta', method='GET', token=tok, host='evil.com') == 403
+    print('[ok] /api 要求访问 token (缺/错 403, ?t= 给 SSE 用; 静态与来源检查不受影响)')
 
 
 def test_upload_sanitize_and_unique_names():
@@ -483,6 +524,264 @@ def test_upload_sanitize_and_unique_names():
     print('[ok] 上传落盘: 穿越剥名 / 保留名补前缀 / 同名加序号 / 后缀改写')
 
 
+def test_request_body_cap_applies_before_parsing():
+    """请求体上限必须在**解析之前**生效。
+
+    旧行为: starlette 的 request.form()/request.json() 先把整个请求体收完 (文件部分
+    超过 1 MiB 就溢写到真实临时文件), 应用内那套分块计数才开始跑 —— 上限只约束了
+    "第二次拷贝", 解析阶段该写满盘照样写满。两道都要在: 能读到 Content-Length 时
+    直接 413; chunked (没有长度) 时按实收字节在 receive 层截断。
+    """
+    import asyncio
+
+    from backend.app import (app as fastapi_app, MAX_JSON_BYTES, MAX_MULTIPART_SLACK,
+                             MAX_UPLOAD_BYTES)
+
+    # 1) 声明超限: 请求体本身很小, 靠 content-length 就该被拒 (不必真的传 2 GiB)
+    status, payload = _asgi_post_get(
+        fastapi_app,
+        _http_scope('POST', '/api/run', content_type='application/json',
+                    body_len=MAX_JSON_BYTES + 1), b'{}')
+    assert status == 413, (status, payload[:200])
+    assert '超过上限' in payload.decode('utf-8'), payload[:200]
+
+    status, _ = _asgi_post_get(
+        fastapi_app,
+        _http_scope('POST', '/api/upload',
+                    content_type='multipart/form-data; boundary=X',
+                    body_len=MAX_UPLOAD_BYTES + MAX_MULTIPART_SLACK + 1))
+    assert status == 413, status
+
+    # 2) 不声明长度 (chunked): 靠实收字节数截断
+    def chunked_status(path, chunks):
+        sent = []
+        pending = list(chunks)
+
+        async def receive():
+            if pending:
+                return {'type': 'http.request', 'body': pending.pop(0), 'more_body': True}
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        async def send(msg):
+            sent.append(msg)
+
+        asyncio.run(fastapi_app(_http_scope('POST', path, content_type='application/json'),
+                                receive, send))
+        return sent[0]['status'] if sent else None
+
+    step = 1024 * 1024
+    over = [b'x' * step] * (MAX_JSON_BYTES // step + 2)        # 9 MiB, 超过 8 MiB 上限
+    assert chunked_status('/api/run', over) == 413
+
+    # 3) 上传那条走的是流式分支 (体量可达 GiB, 不能缓冲)。这里用桩应用把这段逻辑单独
+    #    驱动出来 (真发 2 GiB 不现实; 桩应用只负责把流读完, 于是测的是守卫而不是解析器),
+    #    断言"超限即 413, 且应用没走到回响应那一步"。
+    from backend.app import BodyLimitGuard
+
+    async def drain_app(scope, receive, send):
+        while True:
+            message = await receive()
+            if message['type'] != 'http.request' or not message.get('more_body'):
+                break
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'ok'})
+
+    sent = []
+
+    async def chunk_receive():
+        return {'type': 'http.request', 'body': b'x' * 64, 'more_body': True}
+
+    async def record_send(message):
+        sent.append(message)
+
+    asyncio.run(BodyLimitGuard(drain_app)._pass_stream_capped(
+        _http_scope('POST', '/api/upload'), chunk_receive, record_send, 100))
+    assert sent and sent[0]['status'] == 413, sent[:1]
+    assert all(m.get('status') != 200 for m in sent if m['type'] == 'http.response.start'), sent
+
+    # 4) 正常请求不被误伤
+    status, _ = _asgi_post_get(fastapi_app,
+                               _http_scope('POST', '/api/collect',
+                                           content_type='application/json', body_len=2),
+                               b'{}')
+    assert status == 200, status
+    print('[ok] 请求体上限在解析前生效 (声明超限 413 / chunked 按实收截断 / 上传流式分支)')
+
+
+def test_upload_dir_name_is_unpredictable():
+    """落盘目录名必须随机, 不能是秒级时间戳。
+
+    时间戳可预测 => 攻击者能在清理之后、上传之前, 在 %TEMP%\\StockCleaner 下摆一个
+    同名 junction, 让上传字节落到任意目录 (实测 junction 会被跟随写入, 且
+    os.path.islink 对 junction 返回 False, 只有 lstat 的 REPARSE_POINT 位看得出来)。
+    随机名让"预先摆好"这件事不成立。
+    """
+    import uuid
+
+    from backend.app import app as fastapi_app
+
+    def upload_once():
+        boundary = 'X-SCRand'
+        body = ((f'--{boundary}\r\n'
+                 f'Content-Disposition: form-data; name="files"; '
+                 f'filename="r-{uuid.uuid4().hex[:8]}.csv"\r\n'
+                 f'Content-Type: text/csv\r\n\r\na\n1\n\r\n'
+                 f'--{boundary}--\r\n').encode())
+        scope = _http_scope('POST', '/api/upload',
+                            content_type=f'multipart/form-data; boundary={boundary}',
+                            body_len=len(body))
+        status, payload = _asgi_post_get(fastapi_app, scope, body)
+        assert status == 200, (status, payload[:200])
+        return json.loads(payload)['dir']
+
+    dirs = [upload_once(), upload_once()]
+    try:
+        for d in dirs:
+            name = os.path.basename(d)
+            assert name.startswith('dropped-'), name
+            assert not re.fullmatch(r'dropped-\d{8}-\d{6}', name), \
+                f'落盘目录名还是可预测的时间戳: {name}'
+        assert dirs[0] != dirs[1], '同一秒两次上传落到了同一个目录'
+    finally:
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+    print('[ok] 上传落盘目录随机命名 (不可预测, 挡预置 junction)')
+
+
+def test_upload_dot_names_do_not_sink_the_batch():
+    """'.'/'..' 这类"名字其实是目录"的上传不能让整批上传作废。
+
+    旧实现只兜 FileExistsError, 而 Windows 在名字撞上目录时抛的是 PermissionError,
+    直接 500 —— 实测 ['good.csv','..','good2.csv'] 三个文件一个都没落盘, 用户拿不回
+    任何提示。这里的断言是"整批 200 且三个都在, 名字是普通名"。
+    """
+    import uuid
+
+    from backend.app import app as fastapi_app
+
+    tag = uuid.uuid4().hex[:8]
+    boundary = 'X-SCDot'
+
+    def part(filename, body):
+        return (f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+                f'Content-Type: text/csv\r\n\r\n{body}\r\n').encode()
+
+    body = (part(f'good-{tag}.csv', 'a\n1\n')
+            + part('..', 'a\n1\n')
+            + part('.', 'a\n1\n')
+            + part(f'tail-{tag}.csv', 'a\n2\n')
+            + f'--{boundary}--\r\n'.encode())
+    scope = _http_scope('POST', '/api/upload',
+                        content_type=f'multipart/form-data; boundary={boundary}',
+                        body_len=len(body))
+    status, payload_bytes = _asgi_post_get(fastapi_app, scope, body)
+    assert status == 200, (status, payload_bytes[:200])
+    payload = json.loads(payload_bytes)
+    out_dir = payload['dir']
+    try:
+        names = [os.path.basename(p) for p in payload['paths']]
+        # 整批都活下来: 后面的文件不因前面的坏名字被丢掉
+        assert len(names) == 4, names
+        assert f'good-{tag}.csv' in names and f'tail-{tag}.csv' in names, names
+        assert all(p.startswith(out_dir) for p in payload['paths']), payload['paths']
+        # '.'/'..' 按普通名兜底落盘 (pasted), 不与目录撞名
+        assert sum(1 for n in names if n.startswith('pasted')) == 2, names
+        assert not any(n in ('.', '..') for n in names), names
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print('[ok] 上传落盘: 名为"."/".." 的文件不再让整批上传 500 作废')
+
+
+def test_proto_column_name_protect_reaches_kernel():
+    """列名是 __proto__ 时保护必须真到内核 —— 前端改用 null 原型就是为了让这个 key
+    能被发出来 (普通对象上它会被 Object.prototype 的访问器吃掉)。Python 侧是普通
+    dict, 没有那套语义, 所以后端这一跳只需要确认它没被中途丢掉。"""
+    p = _tmp('proto.csv', '__proto__,金额\n1000,"1,000"\n2000,"2,000"\n')
+    r = core.preview_file(p, dict(CFG, column_overrides={'__proto__': {'protect': True}}))
+    cols = {c['name']: c for c in r['columns']}
+    assert cols['__proto__']['protected'] and cols['__proto__']['changed'] == 0, cols['__proto__']
+    assert cols['金额']['changed'] == 2, cols['金额']
+    print('[ok] __proto__ 列名的保护到达内核并生效')
+
+
+def test_stem_map_output_names_are_unique_across_batch():
+    """生成名不能撞上批内普通文件的 stem —— 只做组内唯一时实测丢一份产出。
+
+    旧实现只把 (stem, targets) 相同的文件聚成组去冲突: 一\\x.csv 与 二\\x.csv 被改成
+    一_x / 二_x, 而目录里本来就有的 一\\二_x.csv 走自己的原名 —— 两个文件写同一个
+    二_x_cleaned.csv, 后跑的那个静默覆盖先跑的, 两条 file_done 却都报 ok。
+    """
+    paths = [r'D:\data\一\x.csv', r'D:\data\二\x.csv', r'D:\data\一\二_x.csv']
+    stem_map, _ = core.build_stem_map(paths, output_format='csv')
+    stems = [stem_map.get(os.path.abspath(p)) or os.path.splitext(os.path.basename(p))[0]
+             for p in paths]
+    assert len({s.lower() for s in stems}) == len(paths), stems
+    planned = [p['out_name'] for p in core.plan_outputs(paths, r'D:\out', [], 'csv')]
+    assert len(set(planned)) == len(paths), planned
+    assert '二_x_cleaned.csv' in planned, planned            # 普通文件保住原名
+    print('[ok] 批内输出名唯一 (生成名不撞普通文件):', planned)
+
+
+def test_output_format_case_does_not_split_dedup_groups():
+    """输出格式的大小写必须在分组与预告两侧同口径, 否则该去冲突的组没去冲突。
+
+    实测: 'CSV' 在 _output_targets 里认不出, 按 keep 给了 x.csv/x.xlsx 不同的目标
+    扩展名, 这两个"其实都写 x_cleaned.csv"的文件因此没被判成冲突; 而 plan_outputs
+    自己 .lower() 后按 csv 预告 —— 两边说法互相矛盾。
+    """
+    assert core._output_targets('x.xlsx', 'CSV') == ['csv']
+    assert core._output_targets('x.xlsx', ' exe ') == ['xlsx']     # 认不出回落 keep
+    assert core.build_stem_map([r'D:\d\x.csv', r'D:\d\x.xlsx'], output_format='CSV')
+    print('[ok] 输出格式归一化在分组/预告两侧一致')
+
+
+def test_preview_caps_column_analysis():
+    """宽表不能决定预览跑多久: 超过上限要截断, 且必须在报告里说出来。"""
+    width = core.MAX_PREVIEW_COLS + 5
+    p = _tmp('wide.csv', ','.join(f'c{i}' for i in range(width)) + '\n'
+             + ','.join('1000' for _ in range(width)) + '\n')
+    r = core.preview_file(p, dict(CFG))
+    assert len(r['columns']) == core.MAX_PREVIEW_COLS, len(r['columns'])
+    assert r['preview']['truncated_columns'] == width - 24, r['preview']['truncated_columns']
+    assert any('列检视上限' in w for w in r['report']['warnings']), r['report']['warnings']
+    print('[ok] 宽表列检视截断 + 显式标注 (%d 列 -> %d)'
+          % (width, len(r['columns'])))
+
+
+def test_manifest_write_path_is_reentrant_under_read_lock():
+    """读侧持锁后 record/prune 内部再读登记不能自锁 (RLock) —— 否则写一次登记就卡死。"""
+    out_dir = os.path.join(tempfile.mkdtemp(prefix='sc-layer-'), 'cleaned')
+    os.makedirs(out_dir, exist_ok=True)
+    src = _tmp('m.csv', 'a\n1\n')
+    assert manifest.record(out_dir, src, [src])
+    assert manifest.registered_outputs([], out_dir)[0], '登记读不到'
+    assert manifest.prune_missing(out_dir) == 0
+    assert manifest.registered_outputs([], out_dir)[0]
+    assert not [f for f in os.listdir(out_dir) if f.endswith('.tmp')], os.listdir(out_dir)
+    print('[ok] 登记读侧持锁后写路径可重入, 无残留 tmp')
+
+
+def test_prune_dropped_only_removes_expired_dirs():
+    """落盘临时目录只清过期的: 当轮任务引用的目录 (刚落的) 不能被删掉。"""
+    from backend.app import _prune_dropped
+
+    root = os.path.join(tempfile.gettempdir(), 'StockCleaner')
+    old = os.path.join(root, 'dropped-19700101-000000')
+    new = os.path.join(root, 'dropped-29990101-000000')
+    os.makedirs(old, exist_ok=True)
+    os.makedirs(new, exist_ok=True)
+    os.utime(old, (1, 1))
+    try:
+        assert _prune_dropped() >= 1
+        assert not os.path.exists(old), '过期目录未被清理'
+        assert os.path.exists(new), '当轮目录被误删'
+    finally:
+        shutil.rmtree(new, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+    print('[ok] dropped-* 只清过期目录, 当轮目录保留')
+
+
 if __name__ == '__main__':
     for fn in (test_preview_changes_match_index_aligned_truth,
                test_preview_changes_with_head_cut,
@@ -501,6 +800,16 @@ if __name__ == '__main__':
                test_extension_policy_is_same_on_both_sides,
                test_paste_classification_uses_filesystem_not_suffix,
                test_local_only_guard_blocks_foreign_host_and_origin,
-               test_upload_sanitize_and_unique_names):
+               test_token_guard_requires_window_token,
+               test_upload_sanitize_and_unique_names,
+               test_request_body_cap_applies_before_parsing,
+               test_upload_dir_name_is_unpredictable,
+               test_upload_dot_names_do_not_sink_the_batch,
+               test_stem_map_output_names_are_unique_across_batch,
+               test_proto_column_name_protect_reaches_kernel,
+               test_output_format_case_does_not_split_dedup_groups,
+               test_preview_caps_column_analysis,
+               test_manifest_write_path_is_reentrant_under_read_lock,
+               test_prune_dropped_only_removes_expired_dirs):
         fn()
     print('\n服务层分层回归全部通过 ✔')

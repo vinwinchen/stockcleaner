@@ -9,6 +9,9 @@ $codeA = "import sys, os; sys.path[:0]=[os.getcwd(), os.path.dirname(os.getcwd()
 $codeB = $codeA -replace '8791', '8792'
 
 $env:PYTHONIOENCODING = 'utf-8'
+# 访问 token: 服务端要求所有 /api/* 带它。两个 Start-Job 与调用的 bench_e2e.py 必须用
+# 同一个值, 所以统一在这里设进环境 (Start-Job 会继承创建时的环境)。
+$env:SC_TOKEN = 'bench-ab'
 
 $jobA = Start-Job -ScriptBlock {
     Set-Location $using:here

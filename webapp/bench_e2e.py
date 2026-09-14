@@ -20,6 +20,9 @@ from bench_xlsx import COLS, gen_rows    # noqa: E402
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8720').rstrip('/')
 ROWS = int(sys.argv[2]) if len(sys.argv) > 2 else 200000
 QUICK = len(sys.argv) > 3 and sys.argv[3] == 'quick'
+# 访问 token (服务端要求所有 /api/* 带它, 见 backend/app.py 的 TokenGuard)。
+# 计时脚本只管读环境变量: 用 bench_ab.ps1 起服务时它会一并设好 SC_TOKEN。
+TOKEN = os.environ.get('SC_TOKEN') or ''
 
 
 def post(path, body, timeout=900):
@@ -27,12 +30,17 @@ def post(path, body, timeout=900):
                                  data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
                                  method='POST')
     req.add_header('Content-Type', 'application/json')
+    if TOKEN:
+        req.add_header('X-SC-Token', TOKEN)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 
 def get(path, timeout=120):
-    with urllib.request.urlopen(BASE + path, timeout=timeout) as resp:
+    req = urllib.request.Request(BASE + path)
+    if TOKEN:
+        req.add_header('X-SC-Token', TOKEN)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 

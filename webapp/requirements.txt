@@ -15,7 +15,9 @@ xlrd>=2.0
 python-calamine>=0.2
 fastapi>=0.115
 uvicorn>=0.30
-python-multipart>=0.0.9
+# 下限抬到 0.0.18: 0.0.9~0.0.17 落在畸形 boundary 导致 CPU 耗尽的公告区间内
+# (CVE-2024-53981 / GHSA-59g5-xgcq-4qw3), 而 /api/upload 正在 multipart 解析路径上。
+python-multipart>=0.0.18
 pywebview>=5.1
 
 # 打包 exe 另需 PyInstaller (构建工具, 不进运行时依赖): pip install "pyinstaller>=6.6"

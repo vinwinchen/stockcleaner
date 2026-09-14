@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-2.2.5-blue)]()
+[![Version](https://img.shields.io/badge/version-2.2.6-blue)]()
 
 </div>
 
@@ -61,6 +61,7 @@ StockCleaner 把这条路反过来走：**逐值解析，失败保留原值，�
 - 逐列保护：任意一列可标记"不参与清洗"，保护列不进任何通道，"报告说改了 N 格"与净改动始终一致。
 - 带时间分量的列拆成日期 + `列名_时间`，不把 `14:30` 与 `09:15` 截成同一个日期。
 - 超过 float64 精度界的整数全程精确；xlsx 里 `|int| ≥ 2^53` 的格子按文本写出，不做舍入。
+- **输出侧防公式注入**：以 `=` `+` `-` `@` 开头的文本格在 xlsx 里按文本写出（openpyxl 默认会把它写成真公式，用户一打开输出就被求值）。原值逐字保留，不加前缀；命中格数与 CSV 侧的局限写进报告警告。
 
 **看得见（界面不是换个皮肤）**
 - **列检视**：每列给出逐格 `原值 → 结果` 对照、改动格数、识别类型（标识符/数值/日期/文本/新增列），按索引配对、行号是原文件位置，删过一行也不串位。
@@ -96,15 +97,18 @@ cd .. && python run.py                             # 起桌面窗口
 其他模式：
 
 ```bash
-python run.py --no-shell              # 不起窗口, 用系统浏览器
+python run.py --no-shell              # 不起窗口, 用系统浏览器 (启动时会打印本次访问 token)
 python run.py --dev                   # 加载 vite dev server (需先在 frontend/ npm run dev)
 python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 ```
+
+这几个模式都会把 token 打进窗口/浏览器地址的 fragment（`#sc_token=…`），所以界面照常。要用手写 HTTP 调 `/api/*`，得带上启动时打印的那个 token：请求头 `X-SC-Token: <token>`，或查询串 `?t=<token>`（SSE 用后者，因为 `EventSource` 不能设请求头）。
 
 环境变量：
 
 | 变量 | 作用 |
 |---|---|
+| `SC_TOKEN` | 钉死访问 token（所有 `/api/*` 必须带它）。不设就每次启动随机生成、随窗口 URL 的 fragment 交给前端——自动化/打包自测时钉一个才不会"生成了但没人知道" |
 | `SC_THEME=dark\|light` | 钉死默认主题（不跟随系统），打包成 exe 或做外观预设时用 |
 | `SC_EXCEL_ENGINE=openpyxl\|xlrd\|calamine` | 钉死 Excel 读取引擎，既是兜底也是 A/B 计时对照组 |
 | `SC_DEBUG=1` | `run.py` 带 devtools 启动 |
@@ -112,9 +116,9 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 依赖说明：`python-calamine` 是非必需项，装了就优先用、没装按容器回落（xlsx/xlsm → openpyxl，xls → xlrd），功能不受影响。
 `xlsxwriter` 实测过但**没有**采用：写 20 万行它 17.4s、openpyxl 16.7s，"换 xlsxwriter 提速"在这个量级上不成立。
 
-**运行发布版 exe**：解压 `StockCleaner-2.2.5-win64.zip`，双击 `StockCleaner.exe`。首次启动可能被 Windows SmartScreen 拦一下，点「更多信息 → 仍要运行」即可（未签名程序的正常提示）。
+**运行发布版 exe**：解压 `StockCleaner-2.2.6-win64.zip`，双击 `StockCleaner.exe`。首次启动可能被 Windows SmartScreen 拦一下，点「更多信息 → 仍要运行」即可（未签名程序的正常提示）。
 
-> 服务只监听回环地址（`127.0.0.1`），并校验 Host 与 Origin 防 DNS rebinding；但它**不设鉴权**，本机其他程序可以调用。这是单用户桌面工具的残余风险，别把它当安全边界。
+> 服务只监听回环地址（`127.0.0.1`），校验 Host 与 Origin 防 DNS rebinding，并要求所有 `/api/*` 带访问 token（见下面的环境变量）。这道 token 挡的是"**权限比你低**、却能连回环的本机程序"——它们本读不到你的文件，却可能借这套 API 读任意文本文件、往任意可写目录落文件。它**不是**针对同权限恶意程序的边界：同用户进程能读到本进程内存与浏览器存储，token 一样拿得到。别把它当安全边界。
 
 ## 界面速览
 
@@ -318,11 +322,12 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
   之后扫描文件夹时按「输出子树 + 登记清单」精确排除，**不会把自己的输出再洗一遍**。
   想重洗自己的输出，请逐个点选文件加入。
 - **xlsx 特例**：`|整数| ≥ 2^53` 的格子按文本写出（避免 float64 舍入）；超过该量级的小数按解析失败保留原值。
+  以 `=` `+` `-` `@` 开头的文本格同样按文本写出（否则会被 Excel 当公式求值），原值逐字不改。
 
 ## 行为约定（理解结果的关键）
 
 1. **预览是样本口径**：默认只扫描**前 500 行**，界面显式标注「样本 500 行」且顶部有常驻提示；正式运行处理**全部行**。列类型识别同样只基于样本 —— 前 500 行没有前导零、后面才出现的代码列，预览会标成数值列而正式运行整列保留。这是有意的保守设计，不是 bug。
-2. **解析失败一律保留原值**：不确定的写法（百分比、欧式小数、畸形千分位、非法日期、超精度小数）宁可原样保留，也绝不猜；这些都会在报告警告区列出。
+2. **解析失败一律保留原值**：不确定的写法（百分比、欧式小数、畸形千分位、非法日期、超精度小数、指数或位数越界的数值如 `1e5000`）宁可原样保留，也绝不猜；这些都会在报告警告区列出。
 3. **标识符列保护**：列中出现前导零数字串即整列保留文本。看到 `000001` 没变成 `1` 是**正确行为**。
 4. **界面报的数 = 内核真的数**：预览与正式运行走同一条代码路径，「改动 N 格」与最终净改动一致；保护列不进入任何通道。
 
@@ -340,6 +345,7 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 | 多出一列 `XXX_时间` | 日期列含时间分量，拆列保留；不需要就关掉「统一为 YYYY-MM-DD」 |
 | 输出被顶掉了 | 同名输出直接覆盖，底栏提前提示；改输出目录或改文件名可避免 |
 | 拖进来的文件去哪了 | 先落到系统临时目录（WebView 拿不到绝对路径），界面会显示落点 |
+| 拖进来提示「请求体超过上限 2048 MB」 | 单次拖拽的请求体上限 2 GiB（含 multipart 余量），整批拒绝；分批拖，或改用「扫描文件夹」按路径处理 |
 | 队列里某文件标「读不了」 | 该文件读入失败（二进制/损坏/编码异常），运行时会跳过并记入报告 |
 | 粘贴路径后队列里什么都没有 | 路径不存在时会提示「找不到的路径」；若文件确实存在，检查路径里有没有多余的引号/换行，或粘成了相对路径 |
 | `.xlsx` 的报表其实是 CSV | 自动按文本读（顶栏显示编码+分隔符）；「跟随输入」会把它写成 `.csv`（跟随真实格式，不是后缀） |
@@ -353,11 +359,13 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 ```bash
 python test_cleaner_core.py                        # 内核回归 (35 项)
 python webapp/test_service_layers.py               # 编排/任务/登记层分层回归, 不起服务
-python run.py --port 8720 --no-shell &             # 另开一个终端
-python api_selftest.py http://127.0.0.1:8720       # 服务层契约 + 端到端 (60 项断言)
+SC_TOKEN=dev python run.py --port 8720 --no-shell &   # 另开一个终端 (PowerShell: $env:SC_TOKEN='dev')
+python api_selftest.py http://127.0.0.1:8720 --token dev   # 服务层契约 + 端到端 (60 项断言)
 python make_fullsample.py                          # 生成全功能样例 (幂等)
-python verify_fullsample.py http://127.0.0.1:8720  # 全功能样例逐项实测
+python verify_fullsample.py http://127.0.0.1:8720 --token dev  # 全功能样例逐项实测
 ```
+
+两个自测脚本都要 token（服务端要求所有 `/api/*` 带它）；`SC_TOKEN` 环境变量与 `--token` 二选一。`bench_ab.ps1` 自己会把 `SC_TOKEN` 设好再起服务，直接跑即可。
 
 `test_service_layers.py` 盯的是"界面报的数 == 内核真的数"这一类账：列检视的改动格数要与按索引对齐独立算出的真值逐列相等、SSE 重连必须能拿到 `job_end`、并发登记不能丢 —— 这些既不在内核里，也不适合靠起服务来断言。
 
@@ -441,8 +449,8 @@ npm --prefix frontend run build                    # 先出前端 dist
 ```
 
 - 产物是 onedir 目录 `webapp/dist/StockCleaner/`，整体分发、双击 `StockCleaner.exe` 启动。选 onedir 不选 onefile：免去每次启动解压的等待，杀软误报也更少。
-- 版本号两处同步改：`pack/version_info.txt`（exe 属性）与 `backend/app.py` 的 `APP_VERSION`。
-- `pack/smoke_test.py` 是发布门槛：起 exe → `/api/meta` → 预览 → 真实清洗并校验产出，任何一步失败非零退出。
+- 版本号四处同步改：`backend/app.py` 的 `APP_VERSION`、`pack/version_info.txt`（exe 属性：`filevers`/`prodvers`/`FileVersion`/`ProductVersion`）、`frontend/package.json`、README 的徽章与 zip 名。
+- `pack/smoke_test.py` 是发布门槛：起 exe → `/api/meta` → 预览 → 真实清洗并校验产出，任何一步失败非零退出。它自己钉一个 `SC_TOKEN` 并用同一个值启动 exe（打包后无控制台，打印出来的 token 看不到）；`--base` 模式下要自己给 `SC_TOKEN`，或用启动时打印的那个。
 - 未签名的 PyInstaller exe 首次启动可能被 Windows SmartScreen 拦一下（"仍要运行"即可）。
 
 ## 项目结构

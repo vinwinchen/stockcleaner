@@ -54,19 +54,27 @@ def serve(port):
     return server, actual
 
 
-def reachable(url, timeout=1.0):
+def reachable(url, timeout=1.0, token=None):
+    """token 只在探自己起的服务时给 (vite dev server 不需要, 也不该拿到)。
+
+    忘了带就是加 TokenGuard 时踩的那个坑: 探针吃 403 -> 壳判定"服务没起来" -> 25 秒后
+    自杀, 窗口从头到尾没出现过 (打包版就是这么起不来的)。
+    """
     import urllib.request
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header('X-SC-Token', token)
     try:
-        with urllib.request.urlopen(url, timeout=timeout):
+        with urllib.request.urlopen(req, timeout=timeout):
             return True
     except Exception:                                       # noqa: BLE001
         return False
 
 
-def wait_for_api(base, timeout=25.0):
+def wait_for_api(base, timeout=25.0, token=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if reachable(base + '/api/meta', 0.8):
+        if reachable(base + '/api/meta', 0.8, token):
             return True
         time.sleep(0.15)
     return False
@@ -221,7 +229,7 @@ def main():
         print(f'[StockCleaner] 端口无法绑定 ({args.port or "自动"}): {exc}', file=sys.stderr)
         sys.exit(1)
     base = f'http://127.0.0.1:{port}'
-    if not wait_for_api(base):
+    if not wait_for_api(base, token=token):
         print('[StockCleaner] 本地服务未能就绪, 请看上方报错。', file=sys.stderr)
         sys.exit(1)
 

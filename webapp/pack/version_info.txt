@@ -16,11 +16,11 @@ VSVersionInfo(
     StringFileInfo([
       StringTable('080404b0', [
         StringStruct('FileDescription', 'StockCleaner - 金融数据清洗'),
-        StringStruct('FileVersion', '2.2.6'),
+        StringStruct('FileVersion', '2.2.7'),
         StringStruct('InternalName', 'StockCleaner'),
         StringStruct('OriginalFilename', 'StockCleaner.exe'),
         StringStruct('ProductName', 'StockCleaner'),
-        StringStruct('ProductVersion', '2.2.6')
+        StringStruct('ProductVersion', '2.2.7')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

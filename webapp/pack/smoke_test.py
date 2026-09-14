@@ -6,7 +6,8 @@
   2. /api/meta 断言 version / static_ready / native;
   3. /api/preview 对样例文件干跑, 断言拿到了列检视数据;
   4. /api/run 提交真实清洗, 轮询 job 到终态, 断言 job_end 且产出文件存在;
-  5. 结束时杀掉自己启动的 exe (--base 模式不动外部服务)。
+  5. 等过桌面壳自己的就绪窗口, 断言壳没自杀 (见下面的 SHELL_ALIVE_WAIT);
+  6. 结束时杀掉自己启动的 exe (--base 模式不动外部服务)。
 
 用法:
   .venv/Scripts/python.exe pack/smoke_test.py --exe dist/StockCleaner/StockCleaner.exe \
@@ -29,6 +30,12 @@ import urllib.request
 # 服务端要求所有 /api/* 带它, 而打包后的 exe 无控制台, 打印出来的 token 看不到 ——
 # 由测试端指定才不会出现"生成了但没人知道"。
 TOKEN = os.environ.get('SC_TOKEN') or 'smoke-test-token'
+
+# 桌面壳 (run.py) 起服务后最多等 wait_for_api 的 25 秒; 等不到就打印报错自杀, 而打包后
+# 没有控制台, 用户只看到"双击没反应"。加 TokenGuard 那轮, 壳的就绪探针漏带 token ->
+# /api/meta 403 -> 25 秒后自杀, 而前面 1~4 步只跑 5 秒, 于是这道发布门槛放它过了。
+# 壳的死活是**从外面唯一能看见的信号**, 所以这里真的等过那个窗口再断言一次。
+SHELL_ALIVE_WAIT = 26.0
 
 
 def http_json(method, url, payload=None, timeout=10):
@@ -72,11 +79,11 @@ def main():
                                 cwd=os.path.dirname(os.path.abspath(args.exe)),
                                 env={**os.environ, 'SC_TOKEN': TOKEN})
         base = f'http://127.0.0.1:{port}'
-        print(f'[1/5] 已启动 {args.exe} (port {port}), 等待 /api/meta ...')
+        print(f'[1/6] 已启动 {args.exe} (port {port}), 等待 /api/meta ...')
 
     try:
         meta = wait_meta(base)
-        print(f'[2/5] meta = {json.dumps(meta, ensure_ascii=False)}')
+        print(f'[2/6] meta = {json.dumps(meta, ensure_ascii=False)}')
         assert meta.get('static_ready') is True, '静态资源未挂载 (frontend/dist 没进包?)'
 
         sample = os.path.abspath(args.sample)
@@ -86,7 +93,7 @@ def main():
                             {'path': sample, 'config': {}})
         assert preview.get('ok') is not False, f'preview 失败: {preview}'
         cols = preview.get('columns') or preview.get('report', {}).get('columns') or []
-        print(f"[3/5] preview ok: keys={sorted(preview.keys())[:8]}, 列数={len(cols)}")
+        print(f"[3/6] preview ok: keys={sorted(preview.keys())[:8]}, 列数={len(cols)}")
 
         if os.path.isdir(args.out):
             shutil.rmtree(args.out)
@@ -105,7 +112,7 @@ def main():
         assert snapshot.get('status') == 'done', f'job 终态异常: {snapshot}'
         assert snapshot.get('ok') == snapshot.get('total') == 1 and not snapshot.get('failed'), \
             f'job 结果异常: {snapshot}'
-        print(f"[4/5] job done: ok={snapshot.get('ok')} failed={snapshot.get('failed')} "
+        print(f"[4/6] job done: ok={snapshot.get('ok')} failed={snapshot.get('failed')} "
               f"elapsed={snapshot.get('elapsed')}s")
 
         produced = []
@@ -114,7 +121,13 @@ def main():
         assert produced, '输出目录为空, 清洗没有落盘'
         for p in produced:
             print(f'      产出: {p} ({os.path.getsize(p)} bytes)')
-        print('[5/5] 冒烟测试通过')
+        # 前面 1~4 步几秒就跑完, 那时壳还没走到它自己的自杀点 —— 只有等过那个窗口,
+        # "壳还在"才算证据。
+        if proc is not None:
+            print(f'[5/6] 等 {SHELL_ALIVE_WAIT:.0f} 秒, 确认桌面壳没自杀 ...')
+            time.sleep(SHELL_ALIVE_WAIT)
+            assert proc.poll() is None, f'桌面壳已退出 (rc={proc.returncode}) —— 启动路径挂了'
+        print('[6/6] 冒烟测试通过')
     finally:
         if proc is not None:
             proc.terminate()

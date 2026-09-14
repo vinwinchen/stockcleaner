@@ -477,6 +477,25 @@ def test_token_guard_requires_window_token():
     print('[ok] /api 要求访问 token (缺/错 403, ?t= 给 SSE 用; 静态与来源检查不受影响)')
 
 
+def test_launcher_readiness_probe_carries_token():
+    """桌面壳的就绪探针必须带 token。
+
+    加 TokenGuard 那轮漏了这一处 HTTP 客户端: 探针不带 token -> /api/meta 403 ->
+    wait_for_api 空等 25 秒判"服务未能就绪"自杀 -> 窗口从头到尾没出现, 且打包版没有
+    控制台, 那句报错看不见, 表现就是"双击没反应"。这里走真 socket + 真 uvicorn,
+    因为探针探的正是这条 HTTP 路径 (裸 ASGI 驱动绕开了它, 所以上次没测出来)。
+    """
+    import run
+
+    server, port = run.serve(0)
+    try:
+        base = f'http://127.0.0.1:{port}'
+        assert run.wait_for_api(base, timeout=10, token=os.environ['SC_TOKEN']) is True
+    finally:
+        server.should_exit = True
+    print('[ok] 就绪探针带 token 通过 TokenGuard (壳不再 25 秒后自杀)')
+
+
 def test_upload_sanitize_and_unique_names():
     """/api/upload 的落盘口径此前零断言: 目录穿越、Windows 保留名、二进制后缀、同名加序号。"""
     import uuid
@@ -801,6 +820,7 @@ if __name__ == '__main__':
                test_paste_classification_uses_filesystem_not_suffix,
                test_local_only_guard_blocks_foreign_host_and_origin,
                test_token_guard_requires_window_token,
+               test_launcher_readiness_probe_carries_token,
                test_upload_sanitize_and_unique_names,
                test_request_body_cap_applies_before_parsing,
                test_upload_dir_name_is_unpredictable,

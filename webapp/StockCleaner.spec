@@ -36,6 +36,12 @@ a = Analysis(
     ],
     hiddenimports=[
         'cleaner_core',
+        # openpyxl 的条件导入: 装了 defusedxml 才走加固解析器 (DEFUSEDXML 为真),
+        # 而那句 import 在函数体/条件分支里, 显式钉一份免得某版 modulefinder 漏收 ——
+        # 漏收的表现是"源码装了、包里没装", 静态看代码根本看不出来。
+        'defusedxml',
+        'defusedxml.ElementTree',
+        'defusedxml.common',
         # uvicorn 按字符串动态导入的部分
         'uvicorn.logging',
         'uvicorn.loops',

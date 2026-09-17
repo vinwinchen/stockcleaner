@@ -9,6 +9,10 @@
 # 而 cleaner_core 的"读取阶段零破坏"整条原则都压在它们身上。测试实测跑在 3.0.5。
 pandas>=2.2,<4
 openpyxl>=3.1
+# 必装, 不是可选加速项: openpyxl 只在装了它时才用加固过的 XML 解析器, 否则回落
+# stdlib xml.etree (实体膨胀/DTD 的已知面, defusedxml 就是为它存在的)。
+# 判定条件见 openpyxl/xml/__init__.py 的 DEFUSEDXML (装了就默认启用, 可用环境变量关掉)。
+defusedxml>=0.7
 xlrd>=2.0
 # Excel 读取加速 (Rust 引擎)。可选: 没装时 _read_excel 会自动退回 openpyxl,
 # 但必须配 dtype=object, 否则 000001 这类代码会被读成 1。

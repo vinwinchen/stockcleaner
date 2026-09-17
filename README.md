@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-2.2.8-blue)]()
+[![Version](https://img.shields.io/badge/version-2.2.9-blue)]()
 
 </div>
 
@@ -116,9 +116,10 @@ python run.py --port 8720 --no-shell  # 固定端口, 便于自测与代理
 | `SC_DEBUG=1` | `run.py` 带 devtools 启动 |
 
 依赖说明：`python-calamine` 是非必需项，装了就优先用、没装按容器回落（xlsx/xlsm → openpyxl，xls → xlrd），功能不受影响。
+`defusedxml` 相反，是**必装项**：openpyxl 只在装了它时才用加固过的 XML 解析器，否则回落 stdlib `xml.etree`（实体膨胀/DTD 的已知面，defusedxml 就是为它存在的）。装了就默认启用，可用环境变量 `OPENPYXL_DEFUSEDXML=False` 关掉（不建议）。
 `xlsxwriter` 实测过但**没有**采用：写 20 万行它 17.4s、openpyxl 16.7s，"换 xlsxwriter 提速"在这个量级上不成立。
 
-**运行发布版 exe**：解压 `StockCleaner-2.2.8-win64.zip`，双击 `StockCleaner.exe`。首次启动可能被 Windows SmartScreen 拦一下，点「更多信息 → 仍要运行」即可（未签名程序的正常提示）。
+**运行发布版 exe**：解压 `StockCleaner-2.2.9-win64.zip`，双击 `StockCleaner.exe`。首次启动可能被 Windows SmartScreen 拦一下，点「更多信息 → 仍要运行」即可（未签名程序的正常提示）。
 
 > 服务只监听回环地址（`127.0.0.1`），校验 Host 与 Origin 防 DNS rebinding，并要求所有 `/api/*` 带访问 token（见下面的环境变量）。这道 token 挡的是"**权限比你低**、却能连回环的本机程序"——它们本读不到你的文件，却可能借这套 API 读任意文本文件、往任意可写目录落文件。它**不是**针对同权限恶意程序的边界：同用户进程能读到本进程内存与浏览器存储，token 一样拿得到。别把它当安全边界。
 

@@ -1121,6 +1121,60 @@ def test_short_row_far_in_file_is_still_repaired():
     print('[ok] 结构预检覆盖整个文件: 深处的一条短行仍被修复并留痕')
 
 
+def test_workbook_xml_uses_hardened_parser():
+    """工作簿 XML 必须走 defusedxml 的加固解析器 —— 这不是"装了更好", 是"没装就没有"。
+
+    实测同一份文件在两种配置下的差别, 这就是判据的区分力所在:
+      装了 defusedxml (默认)      -> 读被拒 (DTD 与实体一律不允许)
+      没装 (OPENPYXL_DEFUSEDXML=False) -> 读成功, 单元格是 'EXPANDED' (实体被老老实实展开)
+
+    为什么值得一条专门的断言: 这是本工具唯一一处"防护等级取决于某个依赖装没装"的地方,
+    而它在业务代码里看不出来 —— requirements.txt 少一行, 恶意工作簿就从"被拒"变成"被展开"。
+    """
+    import zipfile
+
+    import openpyxl.xml as ox
+    import openpyxl.xml.functions as oxf
+
+    assert ox.DEFUSEDXML is True, \
+        'openpyxl 没用上加固解析器 (defusedxml 没装?) —— 工作簿 XML 会回落到 stdlib xml.etree'
+    assert 'defusedxml' in oxf.fromstring.__module__, oxf.fromstring.__module__
+    assert 'defusedxml' in oxf.iterparse.__module__, oxf.iterparse.__module__
+
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'ok.csv')
+    with open(src, 'w', encoding='utf-8', newline='') as fh:
+        fh.write('a,b\nabc,2\n')                 # 文本格: 数值格会被写成 <v>, 没地方插实体
+    _rep, good = process_file(src, tmp, dict(BASE_CFG, output_format='xlsx'))
+
+    # 往工作表 XML 注入 DOCTYPE + 一条实体引用 (放大比很低, libexpat 的启发式拦不住这种,
+    # 所以"被拒"只可能来自 defusedxml 那道判据)
+    hostile = os.path.join(tmp, 'hostile.xlsx')
+    with zipfile.ZipFile(good) as zin, zipfile.ZipFile(hostile, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == 'xl/worksheets/sheet1.xml':
+                xml = data.decode('utf-8')
+                at = xml.index('<worksheet')
+                xml = xml[:at] + '<!DOCTYPE worksheet [<!ENTITY sc "EXPANDED">]>' + xml[at:]
+                xml = xml.replace('<t>abc</t>', '<t>&sc;</t>', 1)
+                data = xml.encode('utf-8')
+            zout.writestr(item, data)
+
+    try:
+        df_h, _meta = read_table(hostile)
+    except Exception:                            # noqa: BLE001  引擎回退后统一报"读不了"
+        pass
+    else:
+        raise AssertionError(
+            f'带 DTD/实体的工作簿被读成了 {df_h["a"].tolist()} —— XML 没走加固解析通道')
+
+    # 加固解析器不能把正常文件挡在门外
+    df_ok, _meta = read_table(good)
+    assert df_ok['a'].tolist() == ['abc'], df_ok['a'].tolist()
+    print('[ok] 工作簿 XML 走 defusedxml 加固解析器 (恶意实体被拒, 正常 xlsx 照读)')
+
+
 def test_numeric_magnitude_bounds_keep_original():
     """指数与位数越界一律按解析失败保留原值。
 
@@ -1194,5 +1248,6 @@ if __name__ == '__main__':
     test_read_size_gates_reject_before_reading()
     test_xlsx_write_limits_and_error_literals()
     test_short_row_far_in_file_is_still_repaired()
+    test_workbook_xml_uses_hardened_parser()
     test_numeric_magnitude_bounds_keep_original()
     print('\n全部测试通过 ✔')

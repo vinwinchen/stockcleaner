@@ -212,6 +212,28 @@ def _access_token():
     return secrets.token_urlsafe(32)
 
 
+def _is_vite_dev_server(url, timeout=1.5):
+    """args.dev 指向的到底是不是 vite dev server。
+
+    这道检查的存在理由不是"防误配", 是 token: 下面会把 `#sc_token=<token>` 交给这个
+    页面, 而 token 的设计目标正是"确认你是本窗口" (见 app.py 的 TokenGuard)。端口是本机
+    任意进程都能占的 —— 一个占了 5173 的本地程序只要被当成 dev server, 就白拿到了整个
+    /api: 读任意文本文件、往任意可写目录落文件, 正好击穿 token 想挡的那种"权限比你低
+    的本机进程"。/@vite/client 是 vite 独有的: 换了别的东西要么 404, 要么那一小段
+    ESM 客户端代码对不上。
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url.rstrip('/') + '/@vite/client',
+                                    timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            body = resp.read(4096).decode('utf-8', 'replace')
+    except Exception:                       # noqa: BLE001  连不上/超时/协议不对都算不是
+        return False
+    return 'createHotContext' in body or '/@vite/' in body
+
+
 def main():
     parser = argparse.ArgumentParser(description='StockCleaner 本地服务 + 桌面壳')
     parser.add_argument('--dev', nargs='?', const='http://localhost:5173', default=None,
@@ -237,14 +259,20 @@ def main():
 
     url = base
     if args.dev:
-        # vite dev server 的请求经代理打到后端, Origin 是 dev 端口而非服务端口,
-        # 必须登记为明确放行源, 否则会 403 (见 app.py 的 LocalOnlyGuard)
-        allow_local_origin(args.dev)
         if not reachable(args.dev, 1.5):
             print(f'[StockCleaner] 开发服务器没在跑: {args.dev}\n'
                   f'              先在 frontend/ 执行 npm install && npm run dev',
                   file=sys.stderr)
+        elif not _is_vite_dev_server(args.dev):
+            # 有东西在监听但不是 vite: 绝不放行它的来源, 也绝不把 token 交给它 ——
+            # 端口本机谁都能占, 放行就等于把整个 /api 交出去 (见 _is_vite_dev_server)。
+            print(f'[StockCleaner] {args.dev} 有东西在监听, 但不是 vite dev server; '
+                  f'已忽略 --dev (不放行该来源, 也不把访问 token 交给它)。',
+                  file=sys.stderr)
         else:
+            # vite dev server 的请求经代理打到后端, Origin 是 dev 端口而非服务端口,
+            # 必须登记为明确放行源, 否则会 403 (见 app.py 的 LocalOnlyGuard)
+            allow_local_origin(args.dev)
             url = args.dev
 
     # token 走 URL 的 fragment: 按 URL 规范 fragment 不会发给服务端, 所以窗口能先拿到页面,

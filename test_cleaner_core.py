@@ -939,7 +939,186 @@ def test_formula_cells_are_written_as_text():
                                                strip_tokens=['X'], output_format='xlsx'))
     cell = openpyxl.load_workbook(out2).active.cell(row=2, column=1)
     assert cell.value == '=1+1' and cell.data_type == 's', (cell.value, cell.data_type)
+
+    # 表头 (列名) 是同一类不可信文本, 走的也是同一条写出路径。只扫数据格时,
+    # "表头就是载荷"的输入会原样写出 <f>, 而且没有任何数据格命中 => 一句警告都没有。
+    src3 = os.path.join(tmp, 'hdr.csv')
+    with open(src3, 'w', encoding='utf-8', newline='') as fh:
+        fh.write("=cmd|' /C calc'!A0,正常列\n1,2\n")
+    rep3, out3 = process_file(src3, tmp, dict(BASE_CFG, output_format='xlsx'))
+    with zipfile.ZipFile(out3) as z:
+        xml3 = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+    head_cell = openpyxl.load_workbook(out3).active['A1']
+    assert head_cell.value == "=cmd|' /C calc'!A0", head_cell.value   # 原文逐字保留
+    assert head_cell.data_type == 's', head_cell.data_type
+    assert '<f>' not in xml3, '表头仍被写成活公式'
+    hit3 = [w for w in rep3['warnings'] if '公式求值' in w]
+    assert len(hit3) == 1 and '表头' in hit3[0], rep3['warnings']
+
+    # csv 侧没有带内文本标记可用 (前置单引号会改写原值, 与"原值逐字保留"冲突),
+    # 那一侧的立场是"不改写 + 把话说清楚", 这条断言盯的就是那句话说到了。
+    rep4, out4 = process_file(src3, tmp, dict(BASE_CFG, output_format='csv'))
+    with open(out4, encoding='utf-8-sig') as fh:
+        assert fh.readline().strip() == "=cmd|' /C calc'!A0,正常列", 'csv 侧改写了原值'
+    hit4 = [w for w in rep4['warnings'] if '公式求值' in w]
+    assert len(hit4) == 1 and '请勿直接双击打开' in hit4[0], rep4['warnings']
     print('[ok] 公式注入: =/@/+ 文本格按文本写入, 且不放过清洗自己造出来的载荷')
+
+
+def test_read_size_gates_reject_before_reading():
+    """读入规模闸门: 体积/解压比越界一律拒读, 且挡在读第一个字节之前。
+
+    旧实现没有任何闸门: 文本路径整文件 read() 之后再用数倍内存物化, xlsx 则照解不误
+    (openpyxl 的容器校验只看后缀与 is_zipfile)。这里不造真的 1 GiB 文件, 而是把阈值
+    压到能用手边文件触发的量级 —— 被测的是闸门的位置与判据, 不是那几个数字本身。
+    """
+    import cleaner_core as cc
+    import zipfile as _zip
+
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'a.csv')
+    with open(src, 'w', encoding='utf-8') as fh:
+        fh.write('a,b\n1,2\n')
+
+    old_bytes = cc._MAX_INPUT_BYTES
+    cc._MAX_INPUT_BYTES = 1                       # 任何文件都超限
+    try:
+        try:
+            read_table(src)
+        except ValueError as exc:
+            assert '上限' in str(exc), exc
+        else:
+            raise AssertionError('原始体积闸门没有生效')
+    finally:
+        cc._MAX_INPUT_BYTES = old_bytes
+
+    # ZIP 解压放大: 正常 xlsx 里的 XML 部件压缩比都很高, 把阈值压到最低那个的一半即可触发
+    _rep, out_xlsx = process_file(src, tmp, dict(BASE_CFG, output_format='xlsx'))
+    with _zip.ZipFile(out_xlsx) as zf:
+        ratios = [i.file_size / i.compress_size for i in zf.infolist() if i.compress_size]
+    assert ratios, '样本 xlsx 没有可压缩成员, 这条测试失去意义'
+    old_ratio = cc._MAX_ZIP_RATIO
+    cc._MAX_ZIP_RATIO = min(ratios) / 2
+    try:
+        try:
+            read_table(out_xlsx)
+        except ValueError as exc:
+            assert '压缩比' in str(exc), exc
+        else:
+            raise AssertionError('ZIP 解压闸门没有生效')
+    finally:
+        cc._MAX_ZIP_RATIO = old_ratio
+    assert read_table(out_xlsx)[0].shape[0] == 1, '阈值恢复后应当照常读'
+
+    # 引擎回退不得吞掉 MemoryError: order 里有 5 个候选, 吞掉就是把一次 OOM 放大成 5 次
+    calls = []
+    real_read_excel = cc.pd.read_excel
+
+    def boom(*_a, **_k):
+        calls.append(1)
+        raise MemoryError()
+
+    cc.pd.read_excel = boom
+    try:
+        try:
+            read_table(out_xlsx)
+        except MemoryError:
+            pass
+        else:
+            raise AssertionError('MemoryError 被引擎回退吞掉了')
+    finally:
+        cc.pd.read_excel = real_read_excel
+    assert len(calls) == 1, f'MemoryError 触发了 {len(calls)} 次引擎重试'
+    print('[ok] 读入闸门: 体积/解压比越界先拒读, MemoryError 不再被引擎回退放大')
+
+
+def test_xlsx_write_limits_and_error_literals():
+    """xlsx 表达不了的格子要响亮拒绝, 错误字面量要按文本写出。
+
+    三条各有各的坏法, 旧实现一条都不报:
+      - 40000 字符的备注: openpyxl 静默截到 32767 (check_string 里的切片, 截断量不回
+        传给调用方, 报告里也无从体现);
+      - 含 \\x01 的文本: openpyxl 抛 IllegalCharacterError, 整份导出失败, 用户看到的是
+        一条三方堆栈;
+      - '#N/A': 被写成 t="e" 错误值 —— 往返读回来还是那个字符串, 所以只有看存储类型
+        才发现"#N/A 是文本不是缺失"这条立场在写出侧被推翻了。
+    前两条 xlsx 无法表达, 所以立场是拒绝 + 指一条出路 (csv), 不是改写数据。
+    """
+    import csv as _csv
+    import zipfile
+
+    import openpyxl
+
+    tmp = tempfile.mkdtemp()
+    long_text = '备' * 40000
+    src = os.path.join(tmp, 'limits.csv')
+    with open(src, 'w', encoding='utf-8', newline='') as fh:
+        w = _csv.writer(fh)
+        w.writerow(['备注', '值'])
+        w.writerow([long_text, '1'])
+
+    for fmt, needle in (('xlsx', '32767'), ('both', '32767')):
+        try:
+            process_file(src, tmp, dict(BASE_CFG, output_format=fmt))
+        except ValueError as exc:
+            assert needle in str(exc) and '备注' in str(exc), exc
+        else:
+            raise AssertionError(f'{fmt}: 超长文本没有被拒绝')
+    # csv 是那条出路: 同一份数据要能原样写出 (不许在 csv 侧悄悄截断)
+    _rep, out_csv = process_file(src, tmp, dict(BASE_CFG, output_format='csv'))
+    df_back, _meta = read_table(out_csv)
+    assert df_back['备注'].tolist() == [long_text], 'csv 侧也没能装下长文本'
+
+    src2 = os.path.join(tmp, 'ctrl.csv')
+    with open(src2, 'w', encoding='utf-8', newline='') as fh:
+        fh.write('备注\n正常\x01控制符\n')
+    try:
+        process_file(src2, tmp, dict(BASE_CFG, output_format='xlsx'))
+    except ValueError as exc:
+        assert '控制字符' in str(exc) and '备注' in str(exc), exc
+    else:
+        raise AssertionError('非法控制字符没有被提前拦下 (到 openpyxl 那里就是整份失败)')
+    _rep2, out_csv2 = process_file(src2, tmp, dict(BASE_CFG, output_format='csv'))
+    with open(out_csv2, encoding='utf-8-sig', newline='') as fh:
+        assert '\x01' in fh.read(), 'csv 侧把控制字符弄丢了'
+
+    # 错误字面量: 按文本写出, 不再是 t="e" 错误值
+    src3 = os.path.join(tmp, 'err.csv')
+    with open(src3, 'w', encoding='utf-8', newline='') as fh:
+        fh.write('状态,值\n#N/A,1\n#DIV/0!,2\n')
+    _rep3, out3 = process_file(src3, tmp, dict(BASE_CFG, output_format='xlsx'))
+    ws = openpyxl.load_workbook(out3).worksheets[0]
+    assert [ws.cell(row=r, column=1).value for r in (2, 3)] == ['#N/A', '#DIV/0!'], \
+        '错误字面量的原值没保住'
+    assert {ws.cell(row=r, column=1).data_type for r in (2, 3)} == {'s'}, \
+        '错误字面量仍被写成错误值'
+    with zipfile.ZipFile(out3) as z:
+        assert b't="e"' not in z.read('xl/worksheets/sheet1.xml'), '输出里仍有错误值格'
+    print('[ok] xlsx 写出侧: 表达不了的格子响亮拒绝, 错误字面量按文本写出')
+
+
+def test_short_row_far_in_file_is_still_repaired():
+    """文件深处的"字段偏少"行必须仍然被检出并留痕 —— pandas 对它是静默的。
+
+    实测: 字段**偏少**的行, pandas 既不警告也不报错, 直接补空 (只有字段偏多那条才抛
+    ParserError)。所以结构预检必须扫完整个文件, 不能只看前 N 行 —— 这条断言用 1200 行
+    之后的一条短行钉住它 (同时也是"预检不再物化整表, 但仍然覆盖全文件"的证据)。
+    """
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, 'short_row.csv')
+    n = 1200
+    bad_at = 1010
+    with open(src, 'w', encoding='utf-8', newline='') as fh:
+        fh.write('a,b\n')
+        for i in range(n):
+            fh.write(f'{i}\n' if i == bad_at else f'{i},x\n')
+
+    df, meta = read_table(src)
+    assert df.shape[1] == 2, df.shape                     # 列没被移位/丢弃
+    assert len(df) == n, len(df)                          # 每一行都还在
+    assert any('字段数' in w for w in meta['warnings']), meta['warnings']
+    assert df['b'].tolist()[bad_at] is None, df['b'].tolist()[bad_at]   # 缺的补空且留痕
+    print('[ok] 结构预检覆盖整个文件: 深处的一条短行仍被修复并留痕')
 
 
 def test_numeric_magnitude_bounds_keep_original():
@@ -1012,5 +1191,8 @@ if __name__ == '__main__':
     test_container_overrides_extension()
     test_progress_callback_monotonic()
     test_formula_cells_are_written_as_text()
+    test_read_size_gates_reject_before_reading()
+    test_xlsx_write_limits_and_error_literals()
+    test_short_row_far_in_file_is_still_repaired()
     test_numeric_magnitude_bounds_keep_original()
     print('\n全部测试通过 ✔')

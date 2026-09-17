@@ -26,6 +26,7 @@ import os
 import csv
 import re
 import warnings
+import zipfile
 from datetime import date, datetime
 from io import StringIO
 from typing import Literal, cast
@@ -541,6 +542,10 @@ def _decode_bytes(raw):
         '无法识别文件编码, 已按 latin-1 兜底读取 (中文可能乱码)'
 
 
+# 分隔符嗅探的样本窗口 (行)。只影响"看多大范围选分隔符": 再大也只是多扫几行文本。
+_SNIFF_LINES = 200
+
+
 def _sniff_delimiter(text, default=','):
     """按"能不能把每行切成同样多列"选分隔符, 而不是数原始字符。
 
@@ -552,7 +557,16 @@ def _sniff_delimiter(text, default=','):
     只有 20 行时真分隔符可能凑不满"众数列数 >= 2"被排除, 误判回默认逗号;
     200 行的解析成本仍然可忽略 (text 已在内存, 每个候选只扫样本)。
     """
-    lines = [ln for ln in text.splitlines() if ln.strip()][:200]
+    lines = []
+    for ln in StringIO(text):        # 惰性逐行: 只为样本建列表
+        # 旧实现是 [ln for ln in text.splitlines() ...][:200] —— 切片发生在
+        # splitlines() 之后, 于是"取 200 行"要先把整个文件的行都建出来 (与下面
+        # 那份结构预检、pandas 的副本同时驻留)。逐行迭代只留下样本这 200 行,
+        # 行边界口径与下游 csv.reader(StringIO(text)) 一致。
+        if ln.strip():
+            lines.append(ln.rstrip('\r\n'))
+            if len(lines) >= _SNIFF_LINES:
+                break
     if not lines:
         return default
     sample = '\n'.join(lines)
@@ -632,6 +646,10 @@ def _read_excel(path):
                            if engine else None)
             return (pd.read_excel(path, engine=read_engine, dtype=object,
                                   keep_default_na=False), engine or 'auto')
+        except MemoryError:
+            # 内存耗尽不是"换个引擎就好了": order 里还有 4 个候选, 继续重试等于把
+            # 一次 OOM 放大成最多 5 次分配, 只会让进程更难活下来。
+            raise
         except Exception as exc:                            # noqa: BLE001
             last_error = exc
             if forced:
@@ -723,6 +741,50 @@ def _mangle_header(header):
     return out
 
 
+# 预检时最多留下多少个单元格 (行 x 列) 的行表: 留住了, 发现字段数不一致时就不必把
+# 文件再解析一遍 (_rebuild_rows 需要全表); 留不住就把行表丢掉, 只做核对。这样
+# "行表与 pandas 结果两份同时驻留"只可能发生在小表上, 大文件的峰值不再随行表翻倍。
+# 100 万格覆盖真实券商导出 (本仓库 5 MB 的 A 股样例是 5567x129 = 72 万格), 也挡得住
+# "一行几十万列"这种畸形表。
+_PRESCAN_KEEP_CELLS = 1_000_000
+
+
+def _prescan_rows(text, delim):
+    """扫完整个文件核对字段数, 返回 (rows, ragged)。rows 为 None 表示行表没留住。
+
+    判据必须覆盖**整个文件**: 实测 pandas 对字段偏少的行既不警告也不报错, 直接补空
+    (只有字段偏多那条才抛 ParserError), 所以"只看前 N 行"会把窗口之外的短行从
+    "有警告地修复"退化成"静默补空" —— 那是拿数据完整性换内存, 方向反了。
+
+    能省的是物化, 且只在超过 _PRESCAN_KEEP_CELLS 时才省: 留一张行表只是多一份与行数
+    同量级的指针 (字段串本来就要被 csv 模块建出来), 而真实券商导出实测就是不一致的
+    (下面那份 5 MB 样例在这条路径上), 重解析一遍要多花 40% 时间。
+    """
+    rows, width, keep, ragged, cells = [], None, True, False, 0
+    try:
+        with StringIO(text) as buf:
+            for r in csv.reader(buf, delimiter=delim):
+                if not r:
+                    continue
+                if not ragged:
+                    if width is None:
+                        width = len(r)
+                    elif len(r) != width:
+                        ragged = True
+                        if not keep:
+                            return None, True       # 行表已丢: 让调用方重读
+                if keep:
+                    rows.append(r)
+                    cells += len(r)             # 预算按累计格数算, 不靠 行数x列数
+                    if cells > _PRESCAN_KEEP_CELLS:
+                        rows, keep = [], False      # 超预算: 丢掉行表, 只留核对
+                        if ragged:
+                            return None, True       # 刚丢了行表又已知不一致: 只能重读
+    except csv.Error:
+        return None, False          # 引号坏了: 交给 pandas 的 ParserError 兜底
+    return rows, ragged
+
+
 def _read_delimited(path, ext):
     with open(path, 'rb') as f:
         raw = f.read()
@@ -734,6 +796,8 @@ def _read_delimited(path, ext):
     if not bom16 and b'\x00' in raw[:65536]:
         raise ValueError('内容是二进制 (含 NUL 字节), 未当文本读取; 请先在源端导出成 csv/xlsx')
     encoding, text, warning = _decode_bytes(raw)
+    del raw                         # 解码后字节串再无用处: 后面每一步都只碰 text,
+                                    # 留着只是让峰值内存多一份整个文件
     if '\x00' in text:
         # 兜底复检: 解码后仍含 NUL 的不是文本 (UTF-32 顶着 UTF-16 BOM、或 NUL
         # 躲在 64KiB 探测窗口之外), 不能让 NUL 混进任何一格文本。
@@ -744,13 +808,14 @@ def _read_delimited(path, ext):
 
     # 结构预检: 引号感知地核对我到的每条记录的字段数, 不一致时走那一份共用修复,
     # 绝不让 pandas 静默移位/截断。一致时仍然交给 C 解析器 (20 万行差一个数量级)。
-    try:
-        rows = [r for r in csv.reader(StringIO(text), delimiter=delim) if r]
-    except csv.Error:
-        rows = None
-    if rows and len(rows) >= 2 and any(len(r) != len(rows[0]) for r in rows[1:]):
+    rows, ragged = _prescan_rows(text, delim)
+    if ragged:
+        if rows is None:            # 行表超预算没留住: 这时才重读一遍 (重建需要全表)
+            rows = [r for r in csv.reader(StringIO(text), delimiter=delim) if r]
         df, ragged_warnings = _rebuild_rows(rows, delim)
         warns.extend(ragged_warnings)
+    del rows, ragged     # 一致时这份行表再无用处: 不能让它活到 pd.read_csv 那一步,
+                         # 否则峰值就是"行表 + pandas 的结果"两份同时驻留 (旧行为)
 
     if df is None:
         try:
@@ -780,6 +845,53 @@ BINARY_EXTS = ('.doc', '.docx', '.ppt', '.pptx', '.zip', '.rar', '.7z', '.pdf', 
                '.dll', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.mp3', '.mp4', '.gz',
                '.tar', '.accdb', '.mdb', '.db', '.sqlite', '.parquet', '.feather', '.bin')
 
+# 读入规模闸门。三个数字都设在"远超本工具用途"的量级, 目的是挡住畸形与恶意文件,
+# 不是为了卡真实数据 (仓库里最大的样例是 5 MB, 券商导出通常几十 MB):
+#   1) 原始体积: 文本路径先把整个文件 read() 进内存, 再解码成 str、再建整表行列表、
+#      再交给 pandas 复制一份 —— 峰值是文件体积的数倍 (见 _read_delimited)。
+#      桌面壳与内核同进程, 一个 1 GiB 的 csv 能把窗口拖进换页甚至被系统杀掉,
+#      用户看到的现象是"点了开始, 程序没了"。上传侧 2 GiB 的配额只约束传输,
+#      不约束解析放大, 所以这道闸门必须在这里。
+#   2) xlsx/xlsm 是 ZIP: 几 KB 的畸形文件可以解压出几 GB, 而 openpyxl 的
+#      _validate_archive 只看后缀与 is_zipfile, 没有任何体积/压缩比判据。
+# 越界一律拒读 (与"二进制拒读"同一口径): 响亮地失败, 不留半份结果、不静默跳过。
+_MAX_INPUT_BYTES = 256 * 1024 ** 2
+_MAX_ZIP_UNCOMPRESSED = 1024 ** 3
+_MAX_ZIP_RATIO = 200
+
+
+def _guard_input_size(path):
+    """读入前的规模闸门: 原始体积 + (ZIP 容器时) 解压体积与压缩比。
+
+    必须在读第一个字节之前: 这道闸门的意义就是"先看再读", 读完再判已经晚了。
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return                      # 连大小都问不到: 交给后面真正的读取去报错
+    if size > _MAX_INPUT_BYTES:
+        raise ValueError(
+            f'文件 {size / (1 << 20):.0f} MB, 超过单次读入上限 '
+            f'{_MAX_INPUT_BYTES // (1 << 20)} MB; 请先在源端拆分或筛选后再洗')
+    if _read_head(path)[:4] not in _ZIP_MAGIC:
+        return                      # xls 是 OLE2 (不压缩), 文本没有解压放大问题
+    try:
+        with zipfile.ZipFile(path) as zf:
+            total = 0
+            for info in zf.infolist():
+                total += info.file_size
+                if total > _MAX_ZIP_UNCOMPRESSED:
+                    raise ValueError(
+                        f'Excel 容器解压后超过 {_MAX_ZIP_UNCOMPRESSED // (1 << 30)} GB, '
+                        '已拒读 (疑似解压炸弹)')
+                if info.compress_size and \
+                        info.file_size / info.compress_size > _MAX_ZIP_RATIO:
+                    raise ValueError(
+                        f'Excel 容器内 {info.filename} 的压缩比超过 {_MAX_ZIP_RATIO}:1, '
+                        '已拒读 (疑似解压炸弹)')
+    except zipfile.BadZipFile:
+        return                      # 不是有效 ZIP: 交给引擎按"文件损坏"报错
+
 
 def read_table(path):
     """读入表格, 返回 (df, meta)。文本文件按文本保真读入, 不做类型推断。
@@ -797,6 +909,7 @@ def read_table(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in BINARY_EXTS:
         raise ValueError(f"不支持的文件类型: {ext} (支持 {' '.join(SUPPORTED_EXTS)})")
+    _guard_input_size(path)
     container = sniff_container(path)
     if container is None:                       # 空文件/读不了头: 退回后缀口径
         container = 'excel' if ext in EXCEL_EXTS else 'text'
@@ -841,8 +954,9 @@ def _xlsx_safe_ints(df):
 
 
 # 会被 Excel 当公式求值的首字符 (CWE-1236): = 开头是公式, + - @ 开头 Excel 会自动
-# 补成公式, 制表/回车开头会被剥掉后再求值。
-_FORMULA_PREFIX = ('=', '+', '-', '@', '\t', '\r')
+# 补成公式, 制表/回车/换行开头会被剥掉后再求值。换行 (LF) 曾经漏在集合外,
+# 而它的两个兄弟都在 —— 判据漏一项是最难发现的那种漏。
+_FORMULA_PREFIX = ('=', '+', '-', '@', '\t', '\r', '\n')
 
 
 def formula_risk_cells(df):
@@ -873,29 +987,116 @@ def formula_risk_cells(df):
     return hits
 
 
-def _neutralize_formula_cells(out_path, df, risky_cells):
-    """把 openpyxl 写成公式的格子改回文本 (只在真有命中时才重写这一遍)。
+def formula_risk_columns(df):
+    """返回 [列下标, ...]: 列名本身以公式字符开头的列。
 
-    置 data_type='s' 后 openpyxl 写出的是 <is><t>, 原文逐字保留 —— 不加前缀、
-    不改写数据, 只是不再作为公式被求值。
+    表头走的是同一条写出路径 (to_excel 的 header=True 写第 1 行), 但旧实现只扫数据格,
+    于是"表头是载荷"的输入会原样写出一个 <f> 节点: 用户一打开输出就按攻击者的公式
+    求值。更糟的是没有数据格命中时连一句警告都没有 —— 漏报至少还能被发现,
+    静默漏报不能。列名和单元格一样是文件里的不可信文本, 判据必须同源。
+    """
+    return [j for j, name in enumerate(df.columns)
+            if isinstance(name, str) and name.startswith(_FORMULA_PREFIX)]
+
+
+def error_text_cells(df):
+    """返回 [(行下标, 列下标), ...]: 内容是 Excel 错误字面量 (#N/A / #DIV/0! …) 的文本格。
+
+    openpyxl 见这类字符串就把格子写成 t="e" 错误值。读回来还是那个字符串, 所以往返
+    测试看不出问题, 但在 Excel 里它不再是一段文本: 排序、筛选、ISNA 全按错误值走。
+    内核的立场是"读取阶段连缺失值名单都不许动" (#N/A 是文本, 不是缺失, 见
+    keep_default_na=False 的理由), 写出侧不能反过来把它变成错误值。名单直接取
+    openpyxl 自己那份, 不另抄一份 —— 判据必须同源。
+    """
+    from openpyxl.cell.cell import ERROR_CODES
+    hits = []
+    for j in range(df.shape[1]):
+        series = df.iloc[:, j]      # 按下标取: 列名重复时 df[col] 会给 DataFrame
+        if not (pd.api.types.is_object_dtype(series)
+                or isinstance(series.dtype, pd.StringDtype)):
+            continue
+        mask = series.isin(ERROR_CODES)
+        if mask.any():
+            hits.extend((int(r), j) for r in mask.to_numpy().nonzero()[0])
+    return hits
+
+
+def _column_names(df, hits, limit=3):
+    names = [f'"{df.columns[j]}"' for j in sorted(hits)]
+    return ', '.join(names[:limit]) + (f' 等 {len(names)} 列' if len(names) > limit else '')
+
+
+# xlsx 的硬限制: 单格文本 32767 字符, 且不允许 U+0000-U+001F 区间的控制字符
+# (制表/换行/回车除外)。这不是本工具能绕过的 —— 但 csv 没有这两条限制。
+_XLSX_MAX_CHARS = 32767
+
+
+def _guard_xlsx_limits(df):
+    """写出之前体检 xlsx 表达不了的格子, 命中就响亮拒绝 (不静默丢尾巴, 不留半份产出)。
+
+    openpyxl 对超长文本静默截断 (check_string 里的切片, 截断量不回传给调用方),
+    对非法控制字符抛 IllegalCharacterError 把整份导出带崩 —— 两种都不是"这一格保留
+    原值": 前者静默改写, 后者以一个三方异常的形式冒到用户面前, 什么也没说清。
+    xlsx 没有表达这些内容的办法, 所以这里既不改写也不丢弃, 而是说清"哪一列、几格"
+    并给出出路: 改走 csv 输出 (同一份数据, csv 装得下)。
+    """
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    too_long, illegal = {}, {}
+    for j in range(df.shape[1]):
+        series = df.iloc[:, j]
+        if not (pd.api.types.is_object_dtype(series)
+                or isinstance(series.dtype, pd.StringDtype)):
+            continue
+        try:
+            long_mask = series.str.len() > _XLSX_MAX_CHARS
+            bad_mask = series.str.contains(ILLEGAL_CHARACTERS_RE, regex=True, na=False)
+        except (AttributeError, TypeError):
+            continue        # 整列没有字符串 (.str 只在这时拒绝); 混合列照常工作
+        if long_mask.any():
+            too_long[j] = int(long_mask.sum())
+        if bad_mask.any():
+            illegal[j] = int(bad_mask.sum())
+    if not too_long and not illegal:
+        return
+    parts = []
+    if too_long:
+        parts.append(f'{sum(too_long.values())} 格文本超过 {_XLSX_MAX_CHARS} 字符 '
+                     f'({_column_names(df, too_long)})')
+    if illegal:
+        parts.append(f'{sum(illegal.values())} 格含 xlsx 不允许的控制字符 '
+                     f'({_column_names(df, illegal)})')
+    raise ValueError('无法写出 xlsx: ' + '; '.join(parts)
+                     + '; xlsx 没有表达它们的办法, 请改用 csv 输出 (或先在源端清理这些格子)')
+
+
+def _rewrite_cells_as_text(out_path, df, cells, columns=()):
+    """把 openpyxl 按类型推断写歪的格子改回文本 (只在真有命中时才重写这一遍)。
+
+    两类都在这里兜: 公式格 (写成 <f> 会被 Excel 求值) 与错误字面量格 (写成 t="e"
+    就不再是文本)。置 data_type='s' 后写出的是 <is><t>, 原文逐字保留 —— 不加前缀、
+    不改写数据, 只是不再被当成公式或错误值。
 
     注意 quotePrefix 样式**挡不住**这个: 实测仍写出 <f> 节点 (那是给人看的显示属性,
     不是存储类型), 必须显式改 data_type。
     """
-    if not risky_cells:
+    if not cells and not columns:
         return
     import openpyxl                                 # 只有命中时才需要 (重写一遍代价不小)
     wb = openpyxl.load_workbook(out_path)
     ws = wb.active
-    for r, c in risky_cells:
+    for r, c in cells:
         cell = ws.cell(row=r + 2, column=c + 1)     # 第 1 行是表头 (to_excel index=False)
         cell.value = df.iat[r, c]
+        cell.data_type = 's'
+    for c in columns:
+        cell = ws.cell(row=1, column=c + 1)         # 表头本身也要中和, 理由见上
+        cell.value = df.columns[c]
         cell.data_type = 's'
     wb.save(out_path)
 
 
 def save_table(df, original_path, output_dir, stem=None, output_format='keep',
-               source_container=None, risky_cells=None):
+               source_container=None, risky_cells=None, risky_columns=None):
     """写出结果, 返回实际写出的路径列表 (第一个是主输出)。
 
     output_format:
@@ -912,9 +1113,13 @@ def save_table(df, original_path, output_dir, stem=None, output_format='keep',
     stem: 显式指定输出主文件名 (不含 _cleaned 与扩展名), 用于批量模式下
     不同子目录同名文件的防冲突。
 
-    risky_cells: formula_risk_cells(df) 的结果, 省掉调用方算过一遍后再算一遍。
-    不传就自己算。xlsx 写出后据此把被 openpyxl 当成公式的格子改回文本 ——
+    risky_cells: "openpyxl 会按类型推断改写的数据格"坐标 —— 公式载荷
+    (formula_risk_cells) 与错误字面量 (error_text_cells) 的合集, 省掉调用方算过一遍
+    后再算一遍。不传就自己算。xlsx 写出后据此把这些格子改回文本 ——
     传进来的下标必须对**写出的这个 df** 成立。
+
+    risky_columns: formula_risk_columns(df) 的结果, 同上 (表头行的命中)。
+    两者都只是"省一次计算", 不传就自己算, 语义完全一致。
     """
     name = stem or os.path.splitext(os.path.basename(original_path))[0]
     ext = os.path.splitext(original_path)[1].lower()
@@ -929,14 +1134,18 @@ def save_table(df, original_path, output_dir, stem=None, output_format='keep',
     else:
         targets = [fmt if fmt in ('xlsx', 'csv') else ('xlsx' if is_excel_src else 'csv')]
 
+    if 'xlsx' in targets:
+        _guard_xlsx_limits(df)      # 表达不了的格子: 在写出之前响亮拒绝, 不留半份产出
     if risky_cells is None:
-        risky_cells = formula_risk_cells(df)
+        risky_cells = formula_risk_cells(df) + error_text_cells(df)
+    if risky_columns is None:
+        risky_columns = formula_risk_columns(df)
     written = []
     for target in targets:
         if target == 'xlsx':
             out_path = os.path.join(output_dir, f"{name}_cleaned.xlsx")
             _xlsx_safe_ints(df).to_excel(out_path, index=False, engine='openpyxl')
-            _neutralize_formula_cells(out_path, df, risky_cells)
+            _rewrite_cells_as_text(out_path, df, risky_cells, risky_columns)
         else:
             out_path = os.path.join(output_dir, f"{name}_cleaned.csv")
             df.to_csv(out_path, index=False, encoding='utf-8-sig')
@@ -1181,25 +1390,33 @@ def process_file(file_path, output_dir, config, progress=None):
     stem = (config.get('stem_map') or {}).get(os.path.abspath(file_path))
     if progress:
         progress(0.85, 'write')
-    # 公式注入: 只算一次, 交给 save_table 用来把 xlsx 里的公式格改回文本
+    # 公式注入: 只算一次, 交给 save_table 用来把 xlsx 里的公式格改回文本。
+    # error_text_cells 是同一处修正的另一类格子 (#N/A 被写成错误值), 一并交过去。
     risky = formula_risk_cells(df)
+    risky_cols = formula_risk_columns(df)
     out_paths = save_table(df, file_path, output_dir, stem,
                            config.get('output_format', 'keep'),
                            source_container=meta.get('container'),
-                           risky_cells=risky)
+                           risky_cells=risky + error_text_cells(df),
+                           risky_columns=risky_cols)
     if progress:
         progress(1.0, 'save')
     report['warnings'].extend(meta.get('warnings') or [])
-    if risky:
+    if risky or risky_cols:
         # 清点实际写了哪些格式再说做了什么, 不能一律说"已按文本写入":
         # csv 没有带内文本标记可用, 那一侧只能靠用户自己拿主意。
         notes = []
         if any(p.lower().endswith('.xlsx') for p in out_paths):
             notes.append('xlsx 输出已按文本写入')
         if any(p.lower().endswith('.csv') for p in out_paths):
-            notes.append('csv 没有带内文本标记, 打开前请确认来源可信')
+            notes.append('csv 没有带内文本标记, 里面的公式仍会被求值, 请勿直接双击打开')
+        hits = []
+        if risky:
+            hits.append(f'{len(risky)} 个单元格')
+        if risky_cols:
+            hits.append(f'{len(risky_cols)} 个表头 (列名)')
         report['warnings'].append(
-            f'{len(risky)} 个单元格以 = + - @ 开头, 在 Excel/WPS 里会被当公式求值'
+            f'{" 和 ".join(hits)} 以 = + - @ 开头, 在 Excel/WPS 里会被当公式求值'
             + ('; ' + '; '.join(notes) if notes else ''))
     if len(out_paths) > 1:
         report['extra_outputs'] = out_paths[1:]

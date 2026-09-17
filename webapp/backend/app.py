@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from . import core
 from .jobs import registry
 
-APP_VERSION = '2.2.7'
+APP_VERSION = '2.2.8'
 # 单次拖拽上传的总量上限。没有上限时, 一次拖进来的东西可以无限写满系统临时目录
 # (落盘发生在任何一个字节被解析之前), 而本机进程面本来就无鉴权。
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
@@ -432,10 +432,20 @@ async def collect(request: Request):
     recursive = bool(data.get('recursive', True))
     output_dir = (data.get('output_dir') or '').strip()
     fmt = str((data.get('config') or {}).get('output_format') or 'keep')
-    skipped: list = []
-    paths = core.expand_inputs(files, dirs, recursive, output_dir=output_dir, skipped=skipped)
-    roots = list(dirs) + [os.path.dirname(p) for p in paths]
-    plan = core.plan_outputs(paths, output_dir, roots, fmt) if paths else []
+
+    def _scan():
+        # 递归 glob + 对每个候选文件读文件头 (sniff_container): 把一个大目录
+        # (或一个 UNC 路径) 加进队列时, 这些同步 I/O 不能占着事件循环 —— 否则
+        # 一次 collect 期间 SSE 心跳、任务快照、取消请求全部停摆, 界面卡死又取消不了。
+        # 同文件的 fs_list / classify / preview 早就走了 to_thread, 这里是遗漏。
+        skipped: list = []
+        paths = core.expand_inputs(files, dirs, recursive,
+                                   output_dir=output_dir, skipped=skipped)
+        roots = list(dirs) + [os.path.dirname(p) for p in paths]
+        plan = core.plan_outputs(paths, output_dir, roots, fmt) if paths else []
+        return paths, plan, skipped
+
+    paths, plan, skipped = await asyncio.to_thread(_scan)
     unsupported = [p for p in files if not core.is_scannable(p)]
     return {'count': len(paths), 'plan': plan,
             'unsupported': [os.path.basename(p) for p in unsupported],
@@ -609,14 +619,14 @@ async def job_events(job_id: str, request: Request):
 def _prune_dropped(keep_days=7):
     """清掉过期的 dropped-* 落盘目录, 返回删掉几个。
 
-    上传的字节落在 %TEMP%/StockCleaner/dropped-*/ (随机名, 见 upload), 从前无人回收: 单次拖拽上限
-    2 GiB, 拖几次就永久占着系统临时目录 (系统没有替应用清临时目录的义务)。只删比
+    上传的字节落在 <工作目录>/dropped-*/ (随机名, 见 upload), 从前无人回收: 单次拖拽上限
+    2 GiB, 拖几次就永久占着磁盘 (系统没有替应用清目录的义务)。只删比
     keep_days 更老的 —— 本轮任务引用的是刚落的目录, 永远扫不到, 所以不会删掉队列里
     正在等清洗的文件。删不掉 (被别的进程占着等) 就跳过, 不影响这次上传。
     """
     import shutil
 
-    root = os.path.join(tempfile.gettempdir(), 'StockCleaner')
+    root = core.work_dir()
     cutoff = time.time() - keep_days * 86400
     try:
         entries = list(os.scandir(root))
@@ -640,20 +650,22 @@ def _prune_dropped(keep_days=7):
 async def upload(request: Request):
     """拖拽进来的文件只有文件名没有绝对路径 (WebView 的安全边界)。
 
-    这里把字节落到系统临时目录再交给同一套内核, 而不是在前端伪造路径。
+    这里把字节落到本工具的私有工作目录再交给同一套内核, 而不是在前端伪造路径。
     """
-    _prune_dropped()
+    await asyncio.to_thread(_prune_dropped)     # 扫描+递归删除, 不能占着事件循环
     form = await request.form()
     files = [v for v in form.getlist('files') if isinstance(v, UploadFile)]
     if not files:
         return JSONResponse({'error': '没有收到文件'}, status_code=400)
     # mkdtemp: 随机名 + 独占创建。原来用秒级时间戳命名, 名字可预测 —— 攻击者能在
-    # 清理之后、上传之前, 在 %TEMP%\StockCleaner 下摆一个同名 junction 把上传内容
-    # 引到任意目录 (实测顺着 junction 写, 字节确实落在其目标目录; 且 os.path.islink
-    # 对 junction 返回 False, 只有 lstat 的 REPARSE_POINT 位看得出来, 靠 islink 防不住)。
-    # 随机名让"预先摆好"这件事不成立。
-    base = os.path.join(tempfile.gettempdir(), 'StockCleaner')
-    os.makedirs(base, exist_ok=True)
+    # 清理之后、上传之前, 在工作目录下摆一个同名 junction 把上传内容引到任意目录
+    # (实测顺着 junction 写, 字节确实落在其目标目录; 且 os.path.islink 对 junction
+    # 返回 False, 只有 lstat 的 REPARSE_POINT 位看得出来, 靠 islink 防不住)。
+    # 随机名让"预先摆好"这件事不成立; 父目录那一层由 ensure_work_dir 复查 (见 core.py)。
+    try:
+        base = core.ensure_work_dir()
+    except OSError as exc:
+        return JSONResponse({'error': f'工作目录不可用: {exc}'}, status_code=500)
     target_dir = tempfile.mkdtemp(prefix='dropped-', dir=base)
     saved = []
     rejected = []
@@ -723,12 +735,29 @@ async def upload(request: Request):
     return out
 
 
+def _is_local_path(path):
+    """本机绝对路径: 不是 UNC/设备命名空间, 也不是驱动器相对形式 (C:xxx)。
+
+    判据存在的理由是 reveal 那句承诺 (见它的 docstring): `os.path.exists('\\\\host\\share')`
+    在 Windows 上会真的去连 SMB —— DNS 查询 + 认证, 等于让"打开文件夹"这个动作出网。
+    其余接受任意路径的接口 (preview/inspect/fs.list) 是用户点名要处理的文件, 指向网络
+    共享是正常用法, 所以只在有明确承诺的这里拦。
+    """
+    p = str(path or '')
+    if not p or p.startswith(('\\\\', '//')):
+        return False
+    return os.path.isabs(p)
+
+
 @app.post('/api/reveal')
 async def reveal(request: Request):
-    """在系统文件管理器里定位输出文件 (仅本机路径, 不做网络出口)。"""
+    """在系统文件管理器里定位输出文件 (仅本机路径: UNC/网络共享一律拒绝)。"""
     data = await _body(request)
     path = (data.get('path') or '').strip()
-    if not path or not os.path.exists(path):
+    if not _is_local_path(path):
+        return JSONResponse({'ok': False, 'error': '只支持本机路径 (不接受 UNC/网络共享)'},
+                            status_code=400)
+    if not os.path.exists(path):
         return JSONResponse({'ok': False, 'error': '路径不存在'}, status_code=404)
     import subprocess
     if os.name == 'nt':

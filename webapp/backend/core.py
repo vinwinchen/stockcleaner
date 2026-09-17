@@ -16,6 +16,7 @@
 import logging
 import os
 import glob as globlib
+import stat
 import tempfile
 from datetime import datetime
 
@@ -770,7 +771,56 @@ def plan_outputs(paths, output_dir, roots, output_format='keep'):
 
 
 # 意外异常的完整堆栈落这里 (FileHandler 带 delay: 真发生异常才建文件)。
-_ERROR_LOG_PATH = os.path.join(tempfile.gettempdir(), 'StockCleaner', 'backend.log')
+# 上传落盘的 dropped-*/ 也在这个目录下 (见 app.py 的 upload)。
+# 位置是**用户私有**的 %LOCALAPPDATA%\StockCleaner, 不是共享的 %TEMP%\StockCleaner:
+# %TEMP% 是本机任意进程都能写的固定名位置, 可以被预先摆成 junction 指向任意目录 ——
+# 实测 mkdtemp 与随后的写入都会落在 junction 的目标里, 而 os.path.islink 对 junction
+# 返回 False (只有 lstat 的 REPARSE_POINT 位看得出来)。叶子目录名已经随机化 (挡"预先
+# 摆同名叶子"), 父目录这一层靠"私有位置 + 用前复查"。
+_ATTR_REPARSE_POINT = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
+
+
+def work_dir():
+    """本工具的私有工作目录 (错误日志 + 上传落盘)。"""
+    root = os.environ.get('LOCALAPPDATA') or tempfile.gettempdir()
+    return os.path.join(root, 'StockCleaner')
+
+
+def is_reparse_point(path):
+    """path 是不是重定向 (junction / 符号链接 / 其他 reparse point)。
+
+    Windows 上 os.path.islink 对 junction 返回 False (实测), os.path.isjunction 又要
+    3.12+; 唯一可靠的判据是 lstat 的 FILE_ATTRIBUTE_REPARSE_POINT 位。
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if getattr(st, 'st_file_attributes', 0) & _ATTR_REPARSE_POINT:
+        return True
+    return stat.S_ISLNK(st.st_mode)
+
+
+def ensure_work_dir():
+    """确保工作目录存在且不是重定向, 返回路径; 不安全时抛 OSError。
+
+    自己 mkdir 而不是 makedirs(exist_ok=True): 目录已存在说明是别人先摆的, 那正好交给
+    下面的复查判它。复查与 mkdir 之间仍有极小窗口, 但这是"提高门槛"而不是安全边界
+    (能写用户私有目录的已经是同用户进程)。命中重定向时宁可失败 —— 把用户拖进来的
+    数据写进一个别人能改指向的目录, 比这个功能不可用严重。
+    """
+    path = work_dir()
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    if is_reparse_point(path):
+        raise OSError(f'工作目录是一个重定向 (junction/符号链接): {path}; '
+                      '请删掉它或改名后重试')
+    return path
+
+
+_ERROR_LOG_PATH = os.path.join(work_dir(), 'backend.log')
 
 
 def _setup_error_log():
@@ -778,10 +828,10 @@ def _setup_error_log():
     if logger.handlers:                    # 重复 import 不重复挂 handler
         return logger
     try:
-        os.makedirs(os.path.dirname(_ERROR_LOG_PATH), exist_ok=True)
+        ensure_work_dir()
         handler: logging.Handler = logging.FileHandler(
             _ERROR_LOG_PATH, encoding='utf-8', delay=True)
-    except OSError:                        # 临时目录不可写时退回 stderr, 不拦住服务
+    except OSError:                        # 目录不可写/被重定向时退回 stderr, 不拦住服务
         handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
     logger.addHandler(handler)

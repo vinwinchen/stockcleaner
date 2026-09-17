@@ -769,11 +769,19 @@ def test_preview_caps_column_analysis():
 
 
 def test_manifest_write_path_is_reentrant_under_read_lock():
-    """读侧持锁后 record/prune 内部再读登记不能自锁 (RLock) —— 否则写一次登记就卡死。"""
+    """读侧持锁后 record/prune 内部再读登记不能自锁 (RLock) —— 否则写一次登记就卡死。
+
+    登记的是**输出目录里**的真实产出: 登记条目现在要过归属校验才作数
+    (见 test_manifest_entries_outside_output_dir_are_not_trusted),
+    拿源文件冒充产出的话这条测试就不再是在测锁了。
+    """
     out_dir = os.path.join(tempfile.mkdtemp(prefix='sc-layer-'), 'cleaned')
     os.makedirs(out_dir, exist_ok=True)
     src = _tmp('m.csv', 'a\n1\n')
-    assert manifest.record(out_dir, src, [src])
+    out = os.path.join(out_dir, 'm_cleaned.csv')
+    with open(out, 'w', encoding='utf-8') as fh:
+        fh.write('a\n1\n')
+    assert manifest.record(out_dir, src, [out])
     assert manifest.registered_outputs([], out_dir)[0], '登记读不到'
     assert manifest.prune_missing(out_dir) == 0
     assert manifest.registered_outputs([], out_dir)[0]
@@ -781,11 +789,45 @@ def test_manifest_write_path_is_reentrant_under_read_lock():
     print('[ok] 登记读侧持锁后写路径可重入, 无残留 tmp')
 
 
+def test_manifest_entries_outside_output_dir_are_not_trusted():
+    """登记里的条目是磁盘上的普通 JSON, 不是权威: 越界条目既不能排除文件, 也不能被探测。
+
+    两条各对应一个后果:
+      1) 伪造的键指向真实文件 => 该文件被静默当成"自己的产出"跳过 (漏文件);
+      2) prune_missing 对每个键做 os.path.exists() => 键写成 UNC 就是一次 SMB 外连,
+         用户的 NTLM 响应会递给攻击者。第 2 条用"记下每个入参"直接断言 ——
+         真去发一次网络请求既慢又不该发生在测试里。
+    """
+    out_dir = os.path.join(tempfile.mkdtemp(prefix='sc-layer-'), 'cleaned')
+    os.makedirs(out_dir, exist_ok=True)
+    victim = os.path.join(tempfile.mkdtemp(prefix='sc-layer-'), '重要数据.csv')
+    with open(victim, 'w', encoding='utf-8') as fh:
+        fh.write('a\n1\n')
+    with open(manifest.manifest_path(out_dir), 'w', encoding='utf-8') as fh:
+        json.dump({'tool': 'StockCleaner', 'version': 1,
+                   'outputs': {victim: {'source': 'x'},
+                               r'\\attacker.example.com\share\x': {'source': 'x'}}}, fh)
+
+    reg, n_files = manifest.registered_outputs([], out_dir)
+    assert not reg, reg                      # 越界条目不得参与"跳过"判定
+    assert n_files == 0, n_files             # 一份可信条目都没有 == 等于没有登记
+
+    seen = []
+    real_exists = manifest.os.path.exists
+    manifest.os.path.exists = lambda p: (seen.append(p), False)[1]
+    try:
+        assert manifest.prune_missing(out_dir) == 0
+    finally:
+        manifest.os.path.exists = real_exists
+    assert seen == [], seen                  # 一个越界字符串都没碰过文件系统
+    print('[ok] 登记里的越界条目不被信任: 不排除文件, 也不拿它去碰文件系统')
+
+
 def test_prune_dropped_only_removes_expired_dirs():
     """落盘临时目录只清过期的: 当轮任务引用的目录 (刚落的) 不能被删掉。"""
     from backend.app import _prune_dropped
 
-    root = os.path.join(tempfile.gettempdir(), 'StockCleaner')
+    root = core.work_dir()
     old = os.path.join(root, 'dropped-19700101-000000')
     new = os.path.join(root, 'dropped-29990101-000000')
     os.makedirs(old, exist_ok=True)
@@ -799,6 +841,131 @@ def test_prune_dropped_only_removes_expired_dirs():
         shutil.rmtree(new, ignore_errors=True)
         shutil.rmtree(old, ignore_errors=True)
     print('[ok] dropped-* 只清过期目录, 当轮目录保留')
+
+
+def test_work_dir_is_private_and_reparse_checked():
+    """工作目录必须是用户私有位置, 且用前确认它不是 junction/符号链接。
+
+    旧实现在共享的 %TEMP%\\StockCleaner 下惰性创建: 固定名 + 谁都能写, 可以被预先摆成
+    junction 指向任意目录 —— 实测 mkdtemp 与随后的写入都落在 junction 的目标里, 而
+    os.path.islink 对 junction 返回 False。叶子目录名虽然已随机化, 父目录那一层原先
+    完全没有防线。
+    """
+    import subprocess
+
+    assert os.path.join(os.environ['LOCALAPPDATA'], 'StockCleaner') == core.work_dir(), \
+        core.work_dir()
+    assert not core.work_dir().lower().startswith(tempfile.gettempdir().lower()), \
+        '工作目录又回到共享的 %TEMP% 了'
+
+    tmp = tempfile.mkdtemp(prefix='sc-reparse-')
+    plain = os.path.join(tmp, 'plain')
+    os.makedirs(plain)
+    assert core.is_reparse_point(plain) is False
+    assert core.is_reparse_point(os.path.join(tmp, '不存在')) is False
+
+    link = os.path.join(tmp, 'link')
+    made = subprocess.run(['cmd', '/c', 'mklink', '/J', link, plain],
+                          capture_output=True)
+    if made.returncode != 0 or not os.path.isdir(link):
+        print('[skip] 本机建不了 junction, 只验证了非重定向的一侧')
+        return
+    try:
+        assert core.is_reparse_point(link) is True, 'junction 没被判成重定向'
+        assert os.path.islink(link) is False, 'os.path.islink 对 junction 竟返回 True'
+        old = os.environ['LOCALAPPDATA']
+        os.environ['LOCALAPPDATA'] = tmp          # 让 work_dir() 落到 tmp/StockCleaner
+        try:
+            os.makedirs(os.path.join(tmp, 'StockCleaner'), exist_ok=True)
+            os.rmdir(os.path.join(tmp, 'StockCleaner'))
+            subprocess.run(['cmd', '/c', 'mklink', '/J',
+                            os.path.join(tmp, 'StockCleaner'), plain],
+                           capture_output=True, check=True)
+            try:
+                core.ensure_work_dir()
+            except OSError as exc:
+                assert '重定向' in str(exc), exc
+            else:
+                raise AssertionError('工作目录是 junction 时仍被接受')
+        finally:
+            os.environ['LOCALAPPDATA'] = old
+    finally:
+        subprocess.run(['cmd', '/c', 'rmdir', link], capture_output=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print('[ok] 工作目录在用户私有位置, 且 junction 会被拒绝')
+
+
+def test_reveal_rejects_unc_without_touching_the_filesystem():
+    """reveal 承诺"不做网络出口": UNC/相对路径必须在 os.path.exists 之前就拒掉。
+
+    `os.path.exists('\\\\host\\share')` 在 Windows 上会真的去连 SMB (DNS + 认证),
+    等于让"打开文件夹"这个动作出网。判据要在碰文件系统之前生效, 所以这里把
+    os.path.exists 换成一个记录器: 越界路径一次都不许交给它。
+    """
+    from backend.app import app as fastapi_app
+    import backend.app as app_module
+
+    def reveal_of(path):
+        scope = _http_scope('POST', '/api/reveal', content_type='application/json',
+                            body_len=len(json.dumps({'path': path})))
+        return _asgi_post_get(fastapi_app, scope, json.dumps({'path': path}).encode())
+
+    seen = []
+    real_exists = app_module.os.path.exists
+    app_module.os.path.exists = lambda p: (seen.append(p), False)[1]
+    try:
+        for bad in (r'\\attacker.example.com\share\x', r'\\?\C:\Windows', 'relative\\x'):
+            status, payload = reveal_of(bad)
+            assert status == 400, (bad, status, payload[:200])
+        assert seen == [], f'越界路径被交给了文件系统: {seen}'
+        # 本机绝对路径照旧放行到"存在性检查"这一步 (404 而不是 400), 没有一刀切
+        status, _payload = reveal_of(r'C:\肯定不存在的目录\x.csv')
+        assert status == 404, status
+        assert seen and seen[0].startswith('C:'), seen
+    finally:
+        app_module.os.path.exists = real_exists
+    print('[ok] reveal 只收本机路径: UNC 在碰文件系统之前就被拒 (含 docstring 口径)')
+
+
+def test_dev_mode_verifies_vite_before_handing_over_token():
+    """`--dev` 必须确认真是 vite, 才放行它的来源并把访问 token 交给它。
+
+    端口本机谁都能占: 一个占了 5173 的本地程序只要被当成 dev server, 就白拿到整个 /api
+    (token 的设计目标正是"确认你是本窗口")。探针的三个结局都要钉住: 连不上、连上了但
+    不是 vite、真 vite。
+    """
+    import run
+    import http.server
+    import socketserver
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        body = b''
+
+        def do_GET(self):                               # noqa: N802
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/javascript')
+            self.send_header('Content-Length', str(len(self.body)))
+            self.end_headers()
+            self.wfile.write(self.body)
+
+        def log_message(self, format, *args):           # noqa: A002  随基类签名
+            pass                                        # 静音, 别污染测试输出
+
+    httpd = socketserver.TCPServer(('127.0.0.1', 0), _Handler)
+    port = httpd.server_address[1]
+    import threading
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{port}'
+    try:
+        _Handler.body = b'window.__x=1'                 # 有东西在监听, 但不是 vite
+        assert run._is_vite_dev_server(url) is False
+        _Handler.body = b'export function createHotContext(){}'   # vite 客户端的样子
+        assert run._is_vite_dev_server(url) is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert run._is_vite_dev_server('http://127.0.0.1:9') is False, '连不上应当判 False'
+    print('[ok] --dev 探针: 只有真 vite 才拿到来源放行与访问 token')
 
 
 if __name__ == '__main__':
@@ -830,6 +997,10 @@ if __name__ == '__main__':
                test_output_format_case_does_not_split_dedup_groups,
                test_preview_caps_column_analysis,
                test_manifest_write_path_is_reentrant_under_read_lock,
-               test_prune_dropped_only_removes_expired_dirs):
+               test_manifest_entries_outside_output_dir_are_not_trusted,
+               test_prune_dropped_only_removes_expired_dirs,
+               test_work_dir_is_private_and_reparse_checked,
+               test_reveal_rejects_unc_without_touching_the_filesystem,
+               test_dev_mode_verifies_vite_before_handing_over_token):
         fn()
     print('\n服务层分层回归全部通过 ✔')
